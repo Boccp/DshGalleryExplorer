@@ -110,6 +110,68 @@ try {
     git remote set-url origin $cleanRemoteUrl
 }
 
+# 同步覆盖到系统标准程序目录 AppData\Local\Programs\DshGalleryExplorer
+$instDir = "$env:LOCALAPPDATA\Programs\DshGalleryExplorer"
+if (-not (Test-Path $instDir)) { New-Item -Path $instDir -ItemType Directory -Force | Out-Null }
+try {
+    Copy-Item -LiteralPath "$repoDir\dsh-gallery-explorer.exe" -Destination "$instDir\dsh-gallery-explorer.exe" -Force -ErrorAction SilentlyContinue
+} catch {}
+
+# 4. 打包并同步更新 GitHub Release (v1.0.0) 附件
+if ($token) {
+    Write-Host "[4/4] 正在同步更新 GitHub Release ($tagName) 安装包附件 ..." -ForegroundColor Yellow
+    $proxy = $null
+    try {
+        $tcp = New-Object System.Net.Sockets.TcpClient
+        $ar = $tcp.BeginConnect("127.0.0.1", 7897, $null, $null)
+        if ($ar.AsyncWaitHandle.WaitOne(300, $false) -and $tcp.Connected) { $proxy = "http://127.0.0.1:7897" }
+        $tcp.Close()
+    } catch {}
+    $headers = @{
+        Authorization = "Bearer $token"
+        Accept = "application/vnd.github+json"
+        "X-GitHub-Api-Version" = "2022-11-28"
+        "User-Agent" = "DshGalleryExplorer-Publisher"
+    }
+    $invokeParams = @{ Headers = $headers }
+    if ($proxy) { $invokeParams["Proxy"] = $proxy }
+
+    Add-Type -AssemblyName System.IO.Compression
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $tempZip = "$env:TEMP\DshGalleryExplorer_Release_temp.zip"
+    if (Test-Path $tempZip) { Remove-Item $tempZip -Force }
+    $zipArchive = [System.IO.Compression.ZipFile]::Open($tempZip, [System.IO.Compression.ZipArchiveMode]::Create)
+    try {
+        $filesToZip = @("README.md", "dsh-gallery-explorer.cs", "dsh-gallery-explorer.exe", "dsh_file_tags.py", "artist_purity_engine.py", "generate_folder_cover_icons.py", "SyncGalleryToGitHub.ps1", "DownloadGalleryFromGitHub.ps1")
+        foreach ($f in $filesToZip) {
+            $full = Join-Path $repoDir $f
+            if (Test-Path $full) {
+                [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zipArchive, $full, $f) | Out-Null
+            }
+        }
+    } finally {
+        $zipArchive.Dispose()
+    }
+    Move-Item -Path $tempZip -Destination $zipPath -Force
+
+    try {
+        $release = Invoke-RestMethod -Method Get -Uri "https://api.github.com/repos/$login/$repoName/releases/tags/$tagName" @invokeParams
+        $uploadUrlBase = ($release.upload_url -replace '\{\?name,label\}$', '')
+        $existingAssets = Invoke-RestMethod -Method Get -Uri "https://api.github.com/repos/$login/$repoName/releases/$($release.id)/assets" @invokeParams
+        foreach ($assetName in @("dsh-gallery-explorer.exe", "DshGalleryExplorer_Release.zip")) {
+            $oldAsset = $existingAssets | Where-Object { $_.name -eq $assetName }
+            if ($oldAsset) {
+                Invoke-RestMethod -Method Delete -Uri "https://api.github.com/repos/$login/$repoName/releases/assets/$($oldAsset.id)" @invokeParams | Out-Null
+            }
+        }
+        Invoke-RestMethod -Method Post -Uri "${uploadUrlBase}?name=dsh-gallery-explorer.exe" -ContentType "application/octet-stream" -InFile "$repoDir\dsh-gallery-explorer.exe" @invokeParams | Out-Null
+        Invoke-RestMethod -Method Post -Uri "${uploadUrlBase}?name=DshGalleryExplorer_Release.zip" -ContentType "application/zip" -InFile $zipPath @invokeParams | Out-Null
+        Write-Host "      -> Release 附件同步完成！" -ForegroundColor Green
+    } catch {
+        Write-Host "      -> Release 附件更新跳过: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+}
+
 Write-Host ""
 Write-Host "=========================================================" -ForegroundColor Green
 Write-Host " ✅ DshGalleryExplorer 同步上传完成！" -ForegroundColor Green
