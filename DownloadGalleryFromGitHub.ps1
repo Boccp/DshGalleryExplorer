@@ -1,5 +1,6 @@
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $Host.UI.RawUI.WindowTitle = "DshGalleryExplorer - 检查并从 GitHub 下载更新（防旧版本降级保护）"
 
 $repoDir = $PSScriptRoot
@@ -70,35 +71,73 @@ $headers = @{
     Accept = "application/vnd.github+json"
     "User-Agent" = "DshGalleryExplorer-VersionChecker"
 }
-$invokeParams = @{ Headers = $headers }
-if ($proxy) { $invokeParams["Proxy"] = $proxy }
+
+# 自动读取本机 GitHub Token（避免共享代理 IP 触发匿名 API 60次/小时 403 限流）
+$token = $env:GITHUB_TOKEN
+$tokenFile = Join-Path $repoDir ".github_token"
+if (-not $token -and (Test-Path $tokenFile)) {
+    $token = (Get-Content $tokenFile -Raw -Encoding UTF8).Trim()
+}
+if (-not $token) {
+    $gcmCandidates = @(
+        "C:\Program Files\Git\mingw64\bin\git-credential-manager.exe",
+        "C:\Users\Admin\AppData\Local\hermes\tools\git-2.53.0+3-win32-x64\mingw64\bin\git-credential-manager.exe",
+        "C:\Users\Administrator\AppData\Local\hermes\tools\git-2.53.0+3-win32-x64\mingw64\bin\git-credential-manager.exe"
+    )
+    foreach ($gcm in $gcmCandidates) {
+        if (Test-Path $gcm) {
+            try {
+                $env:GCM_INTERACTIVE = "never"
+                $credLines = "protocol=https`nhost=github.com`nusername=$login`n`n" | & $gcm get 2>&1
+                foreach ($line in $credLines) {
+                    if ($line -match '^password=(.+)$') { $token = $matches[1].Trim(); break }
+                }
+            } catch {}
+            if ($token) { break }
+        }
+    }
+}
+if ($token) {
+    $headers["Authorization"] = "Bearer $token"
+}
+
+function Invoke-GitHubApi([string]$Uri) {
+    if ($proxy) {
+        try {
+            return Invoke-RestMethod -Method Get -Uri $Uri -Headers $headers -Proxy $proxy
+        } catch {
+            return Invoke-RestMethod -Method Get -Uri $Uri -Headers $headers
+        }
+    }
+    return Invoke-RestMethod -Method Get -Uri $Uri -Headers $headers
+}
 
 Write-Host "[1/2] 正在检测本地版本与 GitHub ($login/$repoName) 远端版本 ..." -ForegroundColor Yellow
 Write-Host ("      本地当前版本 : v{0}" -f $localVer.ToString(3)) -ForegroundColor White
 
 $remoteVer = [version]"1.0.0.0"
 try {
-    $latestRel = Invoke-RestMethod -Method Get -Uri "https://api.github.com/repos/$login/$repoName/releases/latest" @invokeParams
+    $latestRel = Invoke-GitHubApi "https://api.github.com/repos/$login/$repoName/releases/latest"
     if ($latestRel -and $latestRel.tag_name) {
         $remoteVer = Parse-SemVer $latestRel.tag_name
     }
 } catch {}
 
-$commits = Invoke-RestMethod -Method Get -Uri "https://api.github.com/repos/$login/$repoName/commits?per_page=1" @invokeParams
+$commits = Invoke-GitHubApi "https://api.github.com/repos/$login/$repoName/commits?per_page=1"
 $headCommit = $commits[0]
 $remoteCommitSha = $headCommit.sha
 $remoteCommitShort = $remoteCommitSha.Substring(0, 7)
 $remoteCommitTimeUtc = [datetime]::Parse($headCommit.commit.committer.date).ToUniversalTime()
 $remoteCommitMsg = ($headCommit.commit.message -split "`n")[0].Trim()
 
-$tree = Invoke-RestMethod -Method Get -Uri "https://api.github.com/repos/$login/$repoName/git/trees/$remoteCommitSha`?recursive=1" @invokeParams
+$tree = Invoke-GitHubApi "https://api.github.com/repos/$login/$repoName/git/trees/$remoteCommitSha`?recursive=1"
 $remoteCsBlobSha = ""
 foreach ($item in $tree.tree) {
     if ($item.path -eq "dsh-gallery-explorer.cs") {
         $remoteCsBlobSha = $item.sha
     }
     if ($item.path -eq "version.txt") {
-        $blob = Invoke-RestMethod -Method Get -Uri $item.url @invokeParams
+        $blob = Invoke-GitHubApi $item.url
         $text = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($blob.content))
         $v = Parse-SemVer $text
         if ($v -gt $remoteVer) { $remoteVer = $v }
@@ -139,9 +178,9 @@ Start-Sleep -Milliseconds 200
 
 foreach ($item in $tree.tree) {
     if ($item.type -eq "blob") {
-        # Keep local DownloadGalleryFromGitHub.ps1 intact so local post-download hooks are never overwritten
-        if ($item.path -eq "DownloadGalleryFromGitHub.ps1") { continue }
-        $blob = Invoke-RestMethod -Method Get -Uri $item.url @invokeParams
+        # Keep local DownloadGalleryFromGitHub.ps1 & SyncGalleryToGitHub.ps1 intact so local auth/post-download hooks are never overwritten
+        if ($item.path -in @("DownloadGalleryFromGitHub.ps1", "SyncGalleryToGitHub.ps1")) { continue }
+        $blob = Invoke-GitHubApi $item.url
         $bytes = [System.Convert]::FromBase64String($blob.content)
         $outPath = Join-Path $repoDir $item.path
         $outDir = Split-Path -Parent $outPath

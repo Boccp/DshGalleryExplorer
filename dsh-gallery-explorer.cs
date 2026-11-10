@@ -112,6 +112,121 @@ namespace DshGalleryExplorer
         }
     }
 
+    internal sealed class PathEditorDialog : Form
+    {
+        private TextBox _labelBox;
+        private TextBox _pathBox;
+        public string EditedLabel { get { return _labelBox != null ? _labelBox.Text.Trim() : ""; } }
+        public string EditedPath { get { return _pathBox != null ? _pathBox.Text.Trim() : ""; } }
+
+        public PathEditorDialog(string title, string currentLabel, string currentPath, bool showLabelField)
+        {
+            Text = title;
+            Size = new Size(560, showLabelField ? 235 : 180);
+            FormBorderStyle = FormBorderStyle.FixedDialog;
+            StartPosition = FormStartPosition.CenterParent;
+            MaximizeBox = false;
+            MinimizeBox = false;
+            BackColor = Color.FromArgb(24, 27, 35);
+            ForeColor = Color.White;
+
+            int y = 16;
+            if (showLabelField)
+            {
+                Label lblName = new Label
+                {
+                    Text = "显示名称:",
+                    Location = new Point(16, y),
+                    AutoSize = true,
+                    Font = new Font("Microsoft YaHei UI", 9.5f)
+                };
+                _labelBox = new TextBox
+                {
+                    Text = currentLabel ?? "",
+                    Location = new Point(16, y + 24),
+                    Width = 510,
+                    Font = new Font("Microsoft YaHei UI", 10f),
+                    BackColor = Color.FromArgb(14, 16, 22),
+                    ForeColor = Color.White,
+                    BorderStyle = BorderStyle.FixedSingle
+                };
+                Controls.Add(lblName);
+                Controls.Add(_labelBox);
+                y += 62;
+            }
+
+            Label lblPath = new Label
+            {
+                Text = "目标文件夹路径 (可直接粘贴或点击右侧浏览):",
+                Location = new Point(16, y),
+                AutoSize = true,
+                Font = new Font("Microsoft YaHei UI", 9.5f)
+            };
+            _pathBox = new TextBox
+            {
+                Text = currentPath ?? "",
+                Location = new Point(16, y + 24),
+                Width = 420,
+                Font = new Font("Microsoft YaHei UI", 10f),
+                BackColor = Color.FromArgb(14, 16, 22),
+                ForeColor = Color.White,
+                BorderStyle = BorderStyle.FixedSingle
+            };
+
+            Button btnBrowse = new Button
+            {
+                Text = "📂 浏览...",
+                Location = new Point(442, y + 22),
+                Size = new Size(84, 28),
+                FlatStyle = FlatStyle.Flat,
+                BackColor = Color.FromArgb(42, 48, 62),
+                ForeColor = Color.White,
+                Font = new Font("Microsoft YaHei UI", 9f)
+            };
+            btnBrowse.FlatAppearance.BorderColor = Color.FromArgb(70, 78, 96);
+            btnBrowse.Click += (s, e) =>
+            {
+                using (FolderBrowserDialog fbd = new FolderBrowserDialog())
+                {
+                    fbd.Description = title;
+                    if (!string.IsNullOrEmpty(_pathBox.Text) && Directory.Exists(_pathBox.Text))
+                        fbd.SelectedPath = _pathBox.Text;
+                    if (fbd.ShowDialog(this) == DialogResult.OK && !string.IsNullOrEmpty(fbd.SelectedPath))
+                    {
+                        _pathBox.Text = fbd.SelectedPath;
+                    }
+                }
+            };
+
+            Button btnOk = new Button
+            {
+                Text = "保存",
+                DialogResult = DialogResult.OK,
+                Location = new Point(350, y + 66),
+                Size = new Size(84, 32),
+                FlatStyle = FlatStyle.Flat,
+                BackColor = Color.FromArgb(0, 120, 212),
+                ForeColor = Color.White,
+                Font = new Font("Microsoft YaHei UI", 9.5f, FontStyle.Bold)
+            };
+            Button btnCancel = new Button
+            {
+                Text = "取消",
+                DialogResult = DialogResult.Cancel,
+                Location = new Point(442, y + 66),
+                Size = new Size(84, 32),
+                FlatStyle = FlatStyle.Flat,
+                BackColor = Color.FromArgb(45, 50, 62),
+                ForeColor = Color.White,
+                Font = new Font("Microsoft YaHei UI", 9.5f)
+            };
+
+            AcceptButton = btnOk;
+            CancelButton = btnCancel;
+            Controls.AddRange(new Control[] { lblPath, _pathBox, btnBrowse, btnOk, btnCancel });
+        }
+    }
+
     internal sealed class VirtualGridCanvas : Control
     {
         public event Action<EntryItem> ItemOpened;
@@ -230,11 +345,11 @@ namespace DshGalleryExplorer
                 string args = isVideo
                     ? string.Format(
                         System.Globalization.CultureInfo.InvariantCulture,
-                        "-hide_banner -loglevel error -noaccurate_seek -ss 0.5 -i \"{0}\" -frames:v 1 -an -vf \"scale={1}:-2:flags=fast_bilinear\" -q:v 4 -f image2pipe -vcodec mjpeg pipe:1",
+                        "-hide_banner -loglevel error -noaccurate_seek -ss 0.5 -i \"{0}\" -frames:v 1 -an -vf \"scale={1}:-2:flags=fast_bilinear\" -pix_fmt yuvj420p -strict -2 -q:v 4 -f image2pipe -vcodec mjpeg pipe:1",
                         videoPath, Math.Max(160, maxDim))
                     : string.Format(
                         System.Globalization.CultureInfo.InvariantCulture,
-                        "-hide_banner -loglevel error -i \"{0}\" -frames:v 1 -vf \"scale='min({1},iw)':-2:flags=fast_bilinear\" -q:v 3 -f image2pipe -vcodec mjpeg pipe:1",
+                        "-hide_banner -loglevel error -i \"{0}\" -frames:v 1 -vf \"scale='min({1},iw)':-2:flags=fast_bilinear\" -pix_fmt yuvj420p -strict -2 -q:v 3 -f image2pipe -vcodec mjpeg pipe:1",
                         videoPath, Math.Max(160, maxDim));
 
                 ProcessStartInfo psi = new ProcessStartInfo
@@ -1611,7 +1726,7 @@ namespace DshGalleryExplorer
         private int _currentIndex;
         private Bitmap _currentBitmap;
 
-        public FastImageViewerForm(string currentImagePath)
+        public FastImageViewerForm(string currentImagePath, List<string> orderedImagePaths = null)
         {
             Text = Path.GetFileName(currentImagePath) + " — 按 Left/Right 翻页，Esc 或双击退出";
             Rectangle wa = Screen.PrimaryScreen.WorkingArea;
@@ -1623,20 +1738,27 @@ namespace DshGalleryExplorer
             KeyPreview = true;
 
             _imageList = new List<string>();
-            try
+            if (orderedImagePaths != null && orderedImagePaths.Count > 0)
             {
-                string dir = Path.GetDirectoryName(currentImagePath);
-                string[] all = Directory.GetFiles(dir);
-                Array.Sort(all, (a, b) => MainWindow.NaturalCompare(Path.GetFileName(a), Path.GetFileName(b)));
-                string[] exts = new[] { ".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif" };
-                foreach (string f in all)
-                {
-                    if (Array.IndexOf(exts, Path.GetExtension(f).ToLowerInvariant()) >= 0)
-                        _imageList.Add(f);
-                }
+                _imageList.AddRange(orderedImagePaths);
             }
-            catch { }
-            _currentIndex = Math.Max(0, _imageList.IndexOf(currentImagePath));
+            else
+            {
+                try
+                {
+                    string dir = Path.GetDirectoryName(currentImagePath);
+                    string[] all = Directory.GetFiles(dir);
+                    Array.Sort(all, (a, b) => MainWindow.NaturalCompare(Path.GetFileName(a), Path.GetFileName(b)));
+                    string[] exts = new[] { ".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif" };
+                    foreach (string f in all)
+                    {
+                        if (Array.IndexOf(exts, Path.GetExtension(f).ToLowerInvariant()) >= 0)
+                            _imageList.Add(f);
+                    }
+                }
+                catch { }
+            }
+            _currentIndex = Math.Max(0, _imageList.FindIndex(p => string.Equals(p, currentImagePath, StringComparison.OrdinalIgnoreCase)));
             if (_imageList.Count == 0) _imageList.Add(currentImagePath);
             LoadCurrent();
         }
@@ -1845,6 +1967,7 @@ namespace DshGalleryExplorer
             System.Windows.Media.RenderOptions.SetBitmapScalingMode(_mediaElement, System.Windows.Media.BitmapScalingMode.Linear);
             _mediaElement.MediaOpened += OnMediaOpened;
             _mediaElement.MediaEnded += OnMediaEnded;
+            _mediaElement.MediaFailed += OnMediaFailed;
             videoStage.Children.Add(_mediaElement);
 
             _highFpsImage = new System.Windows.Controls.Image
@@ -2035,6 +2158,113 @@ namespace DshGalleryExplorer
                 Top = targetPxY / dpiY;
             }
             catch { }
+        }
+
+        private static bool ProbeVideoDurationAndResolutionViaFfmpeg(string ffmpegExe, string videoPath, out double durationSec, out int width, out int height)
+        {
+            durationSec = 0.0;
+            width = 0;
+            height = 0;
+            try
+            {
+                if (string.IsNullOrEmpty(ffmpegExe) || !File.Exists(ffmpegExe) || string.IsNullOrEmpty(videoPath) || !File.Exists(videoPath))
+                    return false;
+
+                ProcessStartInfo psi = new ProcessStartInfo
+                {
+                    FileName = ffmpegExe,
+                    Arguments = "-hide_banner -i \"" + videoPath + "\"",
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardError = true,
+                    RedirectStandardOutput = false
+                };
+
+                using (Process proc = Process.Start(psi))
+                {
+                    if (proc == null) return false;
+                    string err = proc.StandardError.ReadToEnd();
+                    try { proc.WaitForExit(1500); } catch { }
+
+                    Match mDur = Regex.Match(err ?? "", @"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)");
+                    if (mDur.Success)
+                    {
+                        int hh = int.Parse(mDur.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture);
+                        int mm = int.Parse(mDur.Groups[2].Value, System.Globalization.CultureInfo.InvariantCulture);
+                        double ss = double.Parse(mDur.Groups[3].Value, System.Globalization.CultureInfo.InvariantCulture);
+                        durationSec = hh * 3600.0 + mm * 60.0 + ss;
+                    }
+
+                    Match mRes = Regex.Match(err ?? "", @"Video:.*?\s(\d{2,5})x(\d{2,5})[\s,]");
+                    if (mRes.Success)
+                    {
+                        width = int.Parse(mRes.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture);
+                        height = int.Parse(mRes.Groups[2].Value, System.Globalization.CultureInfo.InvariantCulture);
+                    }
+                    return durationSec > 0.05;
+                }
+            }
+            catch { }
+            return false;
+        }
+
+        private void ApplyPreviewWindowAspect(int vw, int vh)
+        {
+            if (vw > 0 && vh > 0)
+            {
+                double aspect = (double)vw / vh;
+                if (aspect >= 1.0)
+                {
+                    Width = 440;
+                    int stageH = Math.Max(156, Math.Min(310, (int)Math.Round(440.0 / aspect)));
+                    Height = stageH + HEADER_FOOTER_HEIGHT;
+                }
+                else
+                {
+                    int stageH = 320;
+                    int stageW = Math.Max(220, Math.Min(390, (int)Math.Round(stageH * aspect)));
+                    Width = stageW;
+                    Height = stageH + HEADER_FOOTER_HEIGHT;
+                }
+                UpdatePopupPosition(System.Windows.Forms.Cursor.Position, true);
+            }
+        }
+
+        private void OnMediaFailed(object sender, System.Windows.ExceptionRoutedEventArgs e)
+        {
+            // Native MediaElement fails on AV1 (av01) or 10-bit HEVC when Windows Media Foundation lacks the Store MFT.
+            // Immediately fall back to FFmpeg probe + 120fps High-FPS Stream Engine so AV1 videos preview seamlessly!
+            string videoPath = _currentVideoPath;
+            int gen = _streamGeneration;
+            string ffmpegExe = ResolveFfmpegPath();
+            if (string.IsNullOrEmpty(videoPath) || string.IsNullOrEmpty(ffmpegExe)) return;
+
+            ThreadPool.QueueUserWorkItem(_ =>
+            {
+                double dur;
+                int vw, vh;
+                if (!ProbeVideoDurationAndResolutionViaFfmpeg(ffmpegExe, videoPath, out dur, out vw, out vh))
+                {
+                    dur = 15.0;
+                }
+                if (gen != _streamGeneration) return;
+
+                Dispatcher.BeginInvoke(new Action(() =>
+                {
+                    if (gen != _streamGeneration || !string.Equals(_currentVideoPath, videoPath, StringComparison.OrdinalIgnoreCase))
+                        return;
+
+                    _durationSeconds = dur;
+                    _currentSpeedRatio = Math.Max(1.0, dur / TARGET_PREVIEW_CYCLE_SECONDS);
+                    _mediaReady = true;
+                    _isHighFpsStreamMode = true;
+                    ApplyPreviewWindowAspect(vw, vh);
+                    _cycleClock.Restart();
+                    _fpsWindowStartMs = 0;
+                    _framesPresentedInSec = 0;
+                    StartHighFpsReelStream(videoPath, dur, gen, ffmpegExe);
+                }));
+            });
         }
 
         private void OnMediaOpened(object sender, System.Windows.RoutedEventArgs e)
@@ -2278,7 +2508,7 @@ namespace DshGalleryExplorer
                                     double seekSec = (cIdx * usableDur) / chunkCount;
                                     string args = string.Format(
                                         System.Globalization.CultureInfo.InvariantCulture,
-                                        "-hide_banner -loglevel error -noaccurate_seek -threads 2 -flags2 fast -skip_loop_filter all -ss {0:0.00} -i \"{1}\" -frames:v {2} -an -vf \"scale=540:-2:flags=fast_bilinear\" -q:v 4 -f mjpeg pipe:1",
+                                        "-hide_banner -loglevel error -noaccurate_seek -threads 2 -flags2 fast -skip_loop_filter all -ss {0:0.00} -i \"{1}\" -frames:v {2} -an -vf \"scale=540:-2:flags=fast_bilinear\" -pix_fmt yuvj420p -strict -2 -q:v 4 -f mjpeg pipe:1",
                                         seekSec, videoPath, framesPerChunk);
 
                                     ProcessStartInfo psi = new ProcessStartInfo
@@ -2533,9 +2763,41 @@ namespace DshGalleryExplorer
             new TagSpec { Key = "green",  Name = "绿", Color = Color.FromArgb(16, 124, 16),  Hex = "#107C10", Uid = "79376daf-c44a-4fe4-aa3b-8b30baea453e" },
         };
 
-        private const string ARCHIVE_ROOT = @"V:\归档";
+        private string _archiveRoot = Directory.Exists(@"V:\") ? @"V:\归档" : (Directory.Exists(@"D:\") ? @"D:\归档" : @"C:\归档");
+        private static readonly string ARCHIVE_CONFIG_PATH = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), @".dsh\gallery_cache\_dsh_archive_root.txt");
         private static readonly string LEDGER_PATH = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), @".dsh\gallery_cache\_dsh_tags_ledger.json");
         private static readonly string SHORTCUTS_PATH = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), @".dsh\gallery_cache\_dsh_sidebar_shortcuts.json");
+        private static readonly string FOLDER_SORTS_PATH = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), @".dsh\gallery_cache\_dsh_folder_sorts.json");
+
+        public enum SortField { Name, CreatedTime, ModifiedTime, Size, Tag }
+
+        internal sealed class FolderSortSetting
+        {
+            public SortField Field = SortField.Name;
+            public bool Descending = false;
+            public bool FoldersFirst = true;
+            public bool Remember = true;
+        }
+
+        public static string NormalizeFolderKey(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path)) return "";
+            try
+            {
+                string raw = path.Trim().Replace('/', '\\');
+                if (raw.Length == 2 && raw[1] == ':')
+                    raw += "\\";
+                string full = Path.GetFullPath(raw);
+                string trimmed = full.TrimEnd('\\', '/');
+                if (trimmed.Length == 2 && trimmed[1] == ':')
+                    return (trimmed + "\\").ToLowerInvariant();
+                return trimmed.ToLowerInvariant();
+            }
+            catch
+            {
+                return path.Trim().TrimEnd('\\', '/').ToLowerInvariant();
+            }
+        }
 
         private sealed class SidebarShortcutEntry
         {
@@ -2555,18 +2817,37 @@ namespace DshGalleryExplorer
 
         private readonly Dictionary<string, List<string>> _ledgerMap = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, NavHistoryEntry> _dirViewMemory = new Dictionary<string, NavHistoryEntry>(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, FolderSortSetting> _folderSorts = new Dictionary<string, FolderSortSetting>(StringComparer.OrdinalIgnoreCase);
+        private readonly object _folderSortsLock = new object();
         private readonly Stack<NavHistoryEntry> _backStack = new Stack<NavHistoryEntry>();
         private readonly Stack<NavHistoryEntry> _forwardStack = new Stack<NavHistoryEntry>();
         private readonly List<SidebarShortcutEntry> _customShortcuts = new List<SidebarShortcutEntry>();
         private ContextMenuStrip _sidebarContextMenu;
 
-        private enum SortField { Name, CreatedTime, ModifiedTime, Size, Tag }
         private SortField _sortField = SortField.Name;
         private bool _sortDescending = false;
         private bool _sortFoldersFirst = true;
+        private SortField _defaultSortField = SortField.Name;
+        private bool _defaultSortDescending = false;
+        private bool _defaultSortFoldersFirst = true;
+        private bool _rememberFolderSortByDefault = true;
         private bool _autoSyncSystemFolderSort = true;
+        private bool _isUpdatingSortUi = false;
         private Button _btnSortMode;
         private Button _btnSortDir;
+        private Button _btnArchiveConfig;
+        private Label _legendLabel;
+        private ToolStripMenuItem _miArchiveToggle;
+        private ToolStripMenuItem _miRememberCurrentFolderSort;
+        private ToolStripMenuItem _miAutoSyncSystemSort;
+        private ToolStripMenuItem _miSortByName;
+        private ToolStripMenuItem _miSortByCreated;
+        private ToolStripMenuItem _miSortByModified;
+        private ToolStripMenuItem _miSortBySize;
+        private ToolStripMenuItem _miSortByTag;
+        private ToolStripMenuItem _miSortAsc;
+        private ToolStripMenuItem _miSortDesc;
+        private ToolStripMenuItem _miSortFoldersFirst;
 
         private string _currentDirectory = @"F:\Openclow\画师素材库";
         private string _activeTagFilter = null;
@@ -2663,9 +2944,12 @@ namespace DshGalleryExplorer
             catch { }
 
             LoadLedgerFromDisk();
+            LoadFolderSortsFromDisk();
+            LoadArchiveRootFromDisk();
             LoadShortcutsFromDisk();
             BuildUI();
             BuildContextMenu();
+            UpdateArchiveRootUI();
             SetupLedgerWatcher();
 
             string startDir = !string.IsNullOrEmpty(initialPath) && Directory.Exists(initialPath)
@@ -2732,16 +3016,19 @@ namespace DshGalleryExplorer
             _btnSortDir = CreateNavButton("↑ 升序", S(74), S(38), (sender, e) => ToggleSortDirection());
             _btnSortDir.Location = new Point(S(848), S(10));
 
-            Label legend = new Label
+            _btnArchiveConfig = CreateNavButton("📦 归档库: " + _archiveRoot, S(176), S(38), (sender, e) => PromptCustomArchiveRoot());
+            _btnArchiveConfig.Location = new Point(S(928), S(10));
+
+            _legendLabel = new Label
             {
-                Text = "Ctrl+Q/W/E/R [红/橙/黄/绿]  |  Ctrl+T [归档 V:\\归档]  |  长按左键 [框选/拖拽]  |  右键 [菜单/排序]",
+                Text = "Ctrl+Q/W/E/R [红/橙/黄/绿]  |  Ctrl+T [归档 " + _archiveRoot + "]  |  长按左键 [框选/拖拽]  |  右键 [菜单/排序]",
                 AutoSize = true,
                 Font = new Font("Microsoft YaHei UI", 9.0f, FontStyle.Bold),
                 ForeColor = Color.FromArgb(255, 205, 70),
-                Location = new Point(S(932), S(18))
+                Location = new Point(S(1112), S(18))
             };
 
-            topBar.Controls.AddRange(new Control[] { btnBack, btnForward, btnUp, btnRefresh, _addressBox, _btnSortMode, _btnSortDir, legend });
+            topBar.Controls.AddRange(new Control[] { btnBack, btnForward, btnUp, btnRefresh, _addressBox, _btnSortMode, _btnSortDir, _btnArchiveConfig, _legendLabel });
 
             // Bottom Status & Zoom Bar
             Panel bottomBar = new Panel
@@ -2828,17 +3115,28 @@ namespace DshGalleryExplorer
                 ForeColor = Color.FromArgb(180, 190, 210)
             };
 
-            Button btnAddShortcut = CreateNavButton("＋添加", S(62), S(26), (sender, e) => AddCurrentOrSelectedFolderToShortcuts());
-            btnAddShortcut.Location = new Point(S(102), S(3));
-            btnAddShortcut.Font = new Font("Microsoft YaHei UI", 8.5f, FontStyle.Bold);
+            Button btnAddShortcut = CreateNavButton("＋添加", S(52), S(26), (sender, e) => AddCurrentOrSelectedFolderToShortcuts());
+            btnAddShortcut.Location = new Point(S(86), S(3));
+            btnAddShortcut.Font = new Font("Microsoft YaHei UI", 8.2f, FontStyle.Bold);
 
-            Button btnRemoveShortcut = CreateNavButton("－移除", S(62), S(26), (sender, e) => RemoveSelectedSidebarShortcut());
-            btnRemoveShortcut.Location = new Point(S(168), S(3));
-            btnRemoveShortcut.Font = new Font("Microsoft YaHei UI", 8.5f, FontStyle.Bold);
+            Button btnRemoveShortcut = CreateNavButton("－移除", S(52), S(26), (sender, e) => RemoveSelectedSidebarShortcut());
+            btnRemoveShortcut.Location = new Point(S(141), S(3));
+            btnRemoveShortcut.Font = new Font("Microsoft YaHei UI", 8.2f, FontStyle.Bold);
+
+            Button btnGearShortcut = CreateNavButton("⚙", S(34), S(26), (sender, e) =>
+            {
+                if (_sidebarContextMenu != null)
+                {
+                    _sidebarContextMenu.Show(sidebarHeader.PointToScreen(new Point(S(196), S(29))));
+                }
+            });
+            btnGearShortcut.Location = new Point(S(196), S(3));
+            btnGearShortcut.Font = new Font("Microsoft YaHei UI", 9.0f, FontStyle.Bold);
 
             sidebarHeader.Controls.Add(sidebarTitle);
             sidebarHeader.Controls.Add(btnAddShortcut);
             sidebarHeader.Controls.Add(btnRemoveShortcut);
+            sidebarHeader.Controls.Add(btnGearShortcut);
 
             _sidebarList = new ListBox
             {
@@ -2987,27 +3285,54 @@ namespace DshGalleryExplorer
             ToolStripMenuItem sortMenu = new ToolStripMenuItem("⇅ 排序方式 (Sort By)");
             sortMenu.DropDown.BackColor = Color.FromArgb(28, 31, 40);
             sortMenu.DropDown.ForeColor = Color.White;
-            sortMenu.DropDownItems.Add("🔄 自动跟随系统文件夹当前排序 (开关)", null, (s, e) =>
+            sortMenu.DropDownOpening += (s, e) => UpdateSortButtonsUI();
+
+            _miRememberCurrentFolderSort = new ToolStripMenuItem("📌 记忆此文件夹排序设置 (自动保存当前目录排序)", null, (s, e) =>
             {
+                if (_isUpdatingSortUi) return;
+                ToggleRememberCurrentFolderSort();
+            });
+            sortMenu.DropDownItems.Add(_miRememberCurrentFolderSort);
+
+            _miAutoSyncSystemSort = new ToolStripMenuItem("🔄 未记忆文件夹自动跟随系统资源管理器排序 (开关)", null, (s, e) =>
+            {
+                if (_isUpdatingSortUi) return;
                 _autoSyncSystemFolderSort = !_autoSyncSystemFolderSort;
-                if (_autoSyncSystemFolderSort) TryApplyExplorerSortForDirectory(_currentDirectory);
+                SaveFolderSortsToDisk();
+                if (_autoSyncSystemFolderSort && !IsCurrentFolderSortRemembered())
+                {
+                    TryApplyExplorerSortForDirectory(_currentDirectory);
+                }
+                UpdateSortButtonsUI();
                 RefreshCurrentDirectory(_grid.ScrollOffset, _grid.FocusedItem != null ? _grid.FocusedItem.FullPath : null);
             });
+            sortMenu.DropDownItems.Add(_miAutoSyncSystemSort);
             sortMenu.DropDownItems.Add(new ToolStripSeparator());
-            sortMenu.DropDownItems.Add("🔤 按名称排序 (自然序)", null, (s, e) => ApplySort(SortField.Name, _sortDescending, true));
-            sortMenu.DropDownItems.Add("📅 按创建时间排序", null, (s, e) => ApplySort(SortField.CreatedTime, _sortDescending, true));
-            sortMenu.DropDownItems.Add("🕒 按修改时间排序", null, (s, e) => ApplySort(SortField.ModifiedTime, _sortDescending, true));
-            sortMenu.DropDownItems.Add("📏 按文件大小排序", null, (s, e) => ApplySort(SortField.Size, _sortDescending, true));
-            sortMenu.DropDownItems.Add("🏷️ 按标签颜色优先排序 (红>橙>黄>绿)", null, (s, e) => ApplySort(SortField.Tag, _sortDescending, true));
+
+            _miSortByName = new ToolStripMenuItem("🔤 按名称排序 (自然序)", null, (s, e) => { if (!_isUpdatingSortUi) ApplySort(SortField.Name, _sortDescending, true); });
+            _miSortByCreated = new ToolStripMenuItem("📅 按创建时间排序", null, (s, e) => { if (!_isUpdatingSortUi) ApplySort(SortField.CreatedTime, _sortDescending, true); });
+            _miSortByModified = new ToolStripMenuItem("🕒 按修改时间排序", null, (s, e) => { if (!_isUpdatingSortUi) ApplySort(SortField.ModifiedTime, _sortDescending, true); });
+            _miSortBySize = new ToolStripMenuItem("📏 按文件大小排序", null, (s, e) => { if (!_isUpdatingSortUi) ApplySort(SortField.Size, _sortDescending, true); });
+            _miSortByTag = new ToolStripMenuItem("🏷️ 按标签颜色优先排序 (红>橙>黄>绿)", null, (s, e) => { if (!_isUpdatingSortUi) ApplySort(SortField.Tag, _sortDescending, true); });
+            sortMenu.DropDownItems.AddRange(new ToolStripItem[] { _miSortByName, _miSortByCreated, _miSortByModified, _miSortBySize, _miSortByTag });
+
             sortMenu.DropDownItems.Add(new ToolStripSeparator());
-            sortMenu.DropDownItems.Add("↑ 升序排列 (Ascending)", null, (s, e) => ApplySort(_sortField, false, true));
-            sortMenu.DropDownItems.Add("↓ 降序排列 (Descending)", null, (s, e) => ApplySort(_sortField, true, true));
+            _miSortAsc = new ToolStripMenuItem("↑ 升序排列 (Ascending)", null, (s, e) => { if (!_isUpdatingSortUi) ApplySort(_sortField, false, true); });
+            _miSortDesc = new ToolStripMenuItem("↓ 降序排列 (Descending)", null, (s, e) => { if (!_isUpdatingSortUi) ApplySort(_sortField, true, true); });
+            sortMenu.DropDownItems.Add(_miSortAsc);
+            sortMenu.DropDownItems.Add(_miSortDesc);
+
             sortMenu.DropDownItems.Add(new ToolStripSeparator());
-            sortMenu.DropDownItems.Add("📁 切换「文件夹始终置顶 / 混合排列」", null, (s, e) =>
+            _miSortFoldersFirst = new ToolStripMenuItem("📁 文件夹始终置顶 (取消勾选则混合排列)", null, (s, e) =>
             {
+                if (_isUpdatingSortUi) return;
                 _sortFoldersFirst = !_sortFoldersFirst;
+                _defaultSortFoldersFirst = _sortFoldersFirst;
+                PersistCurrentFolderSort();
+                UpdateSortButtonsUI();
                 RefreshCurrentDirectory(_grid.ScrollOffset, _grid.FocusedItem != null ? _grid.FocusedItem.FullPath : null);
             });
+            sortMenu.DropDownItems.Add(_miSortFoldersFirst);
             _contextMenu.Items.Add(sortMenu);
             _contextMenu.Items.Add(new ToolStripSeparator());
 
@@ -3015,7 +3340,9 @@ namespace DshGalleryExplorer
             _contextMenu.Items.Add("🟠 切换【橙】标记 (Ctrl+W)", null, (s, e) => TriggerTagOnSelection((int)Keys.W));
             _contextMenu.Items.Add("🟡 切换【黄】标记 (Ctrl+E)", null, (s, e) => TriggerTagOnSelection((int)Keys.E));
             _contextMenu.Items.Add("🟢 切换【绿】标记 (Ctrl+R)", null, (s, e) => TriggerTagOnSelection((int)Keys.R));
-            _contextMenu.Items.Add("📦 移入 / 复原 V:\\归档 (Ctrl+T)", null, (s, e) => TriggerTagOnSelection((int)Keys.T));
+            _miArchiveToggle = new ToolStripMenuItem("📦 移入 / 复原 " + _archiveRoot + " (Ctrl+T)", null, (s, e) => TriggerTagOnSelection((int)Keys.T));
+            _contextMenu.Items.Add(_miArchiveToggle);
+            _contextMenu.Items.Add("⚙️ 自定义归档库路径...", null, (s, e) => PromptCustomArchiveRoot());
             _contextMenu.Items.Add(new ToolStripSeparator());
 
             _contextMenu.Items.Add("✂️ 剪切选中项 (Ctrl+X)", null, (s, e) => CopyOrCutSelectionToClipboard(true));
@@ -3045,12 +3372,327 @@ namespace DshGalleryExplorer
 
         private void OnContextMenuRequested(EntryItem item, Point clientPt)
         {
+            UpdateSortButtonsUI();
             Point screenPt = _grid.PointToScreen(clientPt);
             _contextMenu.Show(screenPt);
         }
 
+        private bool IsCurrentFolderSortRemembered()
+        {
+            string key = NormalizeFolderKey(_currentDirectory);
+            if (string.IsNullOrEmpty(key)) return _rememberFolderSortByDefault;
+            lock (_folderSortsLock)
+            {
+                FolderSortSetting st;
+                if (_folderSorts.TryGetValue(key, out st) && st != null)
+                {
+                    return st.Remember;
+                }
+            }
+            return _rememberFolderSortByDefault;
+        }
+
+        private void ToggleRememberCurrentFolderSort()
+        {
+            string key = NormalizeFolderKey(_currentDirectory);
+            if (string.IsNullOrEmpty(key)) return;
+
+            bool newRemember = true;
+            lock (_folderSortsLock)
+            {
+                FolderSortSetting st;
+                if (_folderSorts.TryGetValue(key, out st) && st != null)
+                {
+                    st.Remember = !st.Remember;
+                    st.Field = _sortField;
+                    st.Descending = _sortDescending;
+                    st.FoldersFirst = _sortFoldersFirst;
+                    newRemember = st.Remember;
+                }
+                else
+                {
+                    newRemember = !_rememberFolderSortByDefault;
+                    _folderSorts[key] = new FolderSortSetting
+                    {
+                        Field = _sortField,
+                        Descending = _sortDescending,
+                        FoldersFirst = _sortFoldersFirst,
+                        Remember = newRemember
+                    };
+                }
+            }
+            SaveFolderSortsToDisk();
+            UpdateSortButtonsUI();
+            if (_grid != null)
+            {
+                Point pt = _grid.PointToClient(Cursor.Position);
+                _grid.ShowInstantHud(
+                    pt,
+                    newRemember ? "📌 已开启记忆此文件夹排序" : "ℹ️ 已关闭记忆此文件夹排序",
+                    _currentDirectory,
+                    newRemember ? Color.FromArgb(40, 180, 100) : Color.FromArgb(200, 120, 40));
+            }
+        }
+
+        private void PersistCurrentFolderSort()
+        {
+            string key = NormalizeFolderKey(_currentDirectory);
+            if (!string.IsNullOrEmpty(key))
+            {
+                lock (_folderSortsLock)
+                {
+                    FolderSortSetting st;
+                    if (!_folderSorts.TryGetValue(key, out st) || st == null)
+                    {
+                        st = new FolderSortSetting { Remember = _rememberFolderSortByDefault };
+                        _folderSorts[key] = st;
+                    }
+                    // When the user explicitly changes sort in a folder, automatically remember it for this folder!
+                    st.Field = _sortField;
+                    st.Descending = _sortDescending;
+                    st.FoldersFirst = _sortFoldersFirst;
+                    st.Remember = true;
+                }
+            }
+            SaveFolderSortsToDisk();
+        }
+
+        private void RestoreOrDetermineSortForDirectory(string folderPath)
+        {
+            string key = NormalizeFolderKey(folderPath);
+            FolderSortSetting saved = null;
+            if (!string.IsNullOrEmpty(key))
+            {
+                lock (_folderSortsLock)
+                {
+                    _folderSorts.TryGetValue(key, out saved);
+                }
+            }
+
+            if (saved != null && saved.Remember)
+            {
+                _sortField = saved.Field;
+                _sortDescending = saved.Descending;
+                _sortFoldersFirst = saved.FoldersFirst;
+                UpdateSortButtonsUI();
+                return;
+            }
+
+            // If this folder does not have an explicit remembered sort yet, try syncing from open Explorer window if enabled,
+            // otherwise use the persisted global default sort without letting the previous folder's temporary state leak into it!
+            if (_autoSyncSystemFolderSort && TryApplyExplorerSortForDirectory(folderPath))
+            {
+                if (_rememberFolderSortByDefault && !string.IsNullOrEmpty(key))
+                {
+                    lock (_folderSortsLock)
+                    {
+                        _folderSorts[key] = new FolderSortSetting
+                        {
+                            Field = _sortField,
+                            Descending = _sortDescending,
+                            FoldersFirst = _sortFoldersFirst,
+                            Remember = true
+                        };
+                    }
+                    SaveFolderSortsToDisk();
+                }
+                return;
+            }
+
+            _sortField = _defaultSortField;
+            _sortDescending = _defaultSortDescending;
+            _sortFoldersFirst = _defaultSortFoldersFirst;
+            UpdateSortButtonsUI();
+        }
+
+        private void LoadFolderSortsFromDisk()
+        {
+            try
+            {
+                if (!File.Exists(FOLDER_SORTS_PATH)) return;
+                string content = File.ReadAllText(FOLDER_SORTS_PATH, Encoding.UTF8);
+                if (string.IsNullOrWhiteSpace(content)) return;
+
+                lock (_folderSortsLock)
+                {
+                    _folderSorts.Clear();
+                    string trimmed = content.TrimStart();
+                    if (trimmed.StartsWith("{"))
+                    {
+                        Match mField = Regex.Match(content, "\"defaultField\"\\s*:\\s*\"([^\"]+)\"");
+                        if (mField.Success) Enum.TryParse(mField.Groups[1].Value, true, out _defaultSortField);
+                        Match mDesc = Regex.Match(content, "\"defaultDescending\"\\s*:\\s*(true|false)", RegexOptions.IgnoreCase);
+                        if (mDesc.Success) bool.TryParse(mDesc.Groups[1].Value, out _defaultSortDescending);
+                        Match mFirst = Regex.Match(content, "\"defaultFoldersFirst\"\\s*:\\s*(true|false)", RegexOptions.IgnoreCase);
+                        if (mFirst.Success) bool.TryParse(mFirst.Groups[1].Value, out _defaultSortFoldersFirst);
+                        Match mAuto = Regex.Match(content, "\"autoSyncSystemFolderSort\"\\s*:\\s*(true|false)", RegexOptions.IgnoreCase);
+                        if (mAuto.Success) bool.TryParse(mAuto.Groups[1].Value, out _autoSyncSystemFolderSort);
+                        Match mRem = Regex.Match(content, "\"rememberFolderSortByDefault\"\\s*:\\s*(true|false)", RegexOptions.IgnoreCase);
+                        if (mRem.Success) bool.TryParse(mRem.Groups[1].Value, out _rememberFolderSortByDefault);
+
+                        foreach (Match m in Regex.Matches(content, "\"((?:[^\"\\\\]|\\\\.)+)\"\\s*:\\s*\\{([^\\}]*)\\}"))
+                        {
+                            string rawKey = UnescapeJsonString(m.Groups[1].Value);
+                            if (string.Equals(rawKey, "folders", StringComparison.OrdinalIgnoreCase)) continue;
+                            string body = m.Groups[2].Value;
+                            FolderSortSetting st = new FolderSortSetting
+                            {
+                                Field = _defaultSortField,
+                                Descending = _defaultSortDescending,
+                                FoldersFirst = _defaultSortFoldersFirst,
+                                Remember = true
+                            };
+                            Match mf = Regex.Match(body, "\"field\"\\s*:\\s*\"([^\"]+)\"");
+                            if (mf.Success) Enum.TryParse(mf.Groups[1].Value, true, out st.Field);
+                            Match md = Regex.Match(body, "\"descending\"\\s*:\\s*(true|false)", RegexOptions.IgnoreCase);
+                            if (md.Success) bool.TryParse(md.Groups[1].Value, out st.Descending);
+                            Match mff = Regex.Match(body, "\"foldersFirst\"\\s*:\\s*(true|false)", RegexOptions.IgnoreCase);
+                            if (mff.Success) bool.TryParse(mff.Groups[1].Value, out st.FoldersFirst);
+                            Match mr = Regex.Match(body, "\"remember\"\\s*:\\s*(true|false)", RegexOptions.IgnoreCase);
+                            if (mr.Success) bool.TryParse(mr.Groups[1].Value, out st.Remember);
+
+                            string normKey = NormalizeFolderKey(rawKey);
+                            if (!string.IsNullOrEmpty(normKey))
+                            {
+                                _folderSorts[normKey] = st;
+                            }
+                        }
+                    }
+                    else
+                    {
+                        // Fallback TSV parsing
+                        string[] lines = content.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+                        foreach (string rawLine in lines)
+                        {
+                            string line = rawLine.Trim();
+                            if (string.IsNullOrEmpty(line) || line.StartsWith("#")) continue;
+                            string[] parts = line.Split('\t');
+                            if (parts.Length >= 5 && parts[0] == "@GLOBAL")
+                            {
+                                Enum.TryParse(parts[1], true, out _defaultSortField);
+                                bool.TryParse(parts[2], out _defaultSortDescending);
+                                bool.TryParse(parts[3], out _defaultSortFoldersFirst);
+                                bool.TryParse(parts[4], out _autoSyncSystemFolderSort);
+                            }
+                            else if (parts.Length >= 4)
+                            {
+                                string normKey = NormalizeFolderKey(parts[0]);
+                                if (string.IsNullOrEmpty(normKey)) continue;
+                                FolderSortSetting st = new FolderSortSetting();
+                                Enum.TryParse(parts[1], true, out st.Field);
+                                bool.TryParse(parts[2], out st.Descending);
+                                bool.TryParse(parts[3], out st.FoldersFirst);
+                                if (parts.Length >= 5) bool.TryParse(parts[4], out st.Remember);
+                                _folderSorts[normKey] = st;
+                            }
+                        }
+                    }
+                }
+
+                _sortField = _defaultSortField;
+                _sortDescending = _defaultSortDescending;
+                _sortFoldersFirst = _defaultSortFoldersFirst;
+            }
+            catch { }
+        }
+
+        private static string UnescapeJsonString(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return "";
+            StringBuilder sb = new StringBuilder(s.Length);
+            for (int i = 0; i < s.Length; i++)
+            {
+                char c = s[i];
+                if (c == '\\' && i + 1 < s.Length)
+                {
+                    char next = s[++i];
+                    if (next == '\\') sb.Append('\\');
+                    else if (next == '\"') sb.Append('\"');
+                    else if (next == 'r') sb.Append('\r');
+                    else if (next == 'n') sb.Append('\n');
+                    else if (next == 't') sb.Append('\t');
+                    else sb.Append(next);
+                }
+                else
+                {
+                    sb.Append(c);
+                }
+            }
+            return sb.ToString();
+        }
+
+        private static string EscapeJsonString(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return "";
+            StringBuilder sb = new StringBuilder(s.Length + 8);
+            foreach (char c in s)
+            {
+                if (c == '\\') sb.Append("\\\\");
+                else if (c == '\"') sb.Append("\\\"");
+                else if (c == '\r') sb.Append("\\r");
+                else if (c == '\n') sb.Append("\\n");
+                else if (c == '\t') sb.Append("\\t");
+                else sb.Append(c);
+            }
+            return sb.ToString();
+        }
+
+        private void SaveFolderSortsToDisk()
+        {
+            try
+            {
+                string dir = Path.GetDirectoryName(FOLDER_SORTS_PATH);
+                if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir)) Directory.CreateDirectory(dir);
+
+                StringBuilder sb = new StringBuilder();
+                sb.Append("{\n");
+                sb.Append("  \"defaultField\": \"").Append(_defaultSortField.ToString()).Append("\",\n");
+                sb.Append("  \"defaultDescending\": ").Append(_defaultSortDescending ? "true" : "false").Append(",\n");
+                sb.Append("  \"defaultFoldersFirst\": ").Append(_defaultSortFoldersFirst ? "true" : "false").Append(",\n");
+                sb.Append("  \"autoSyncSystemFolderSort\": ").Append(_autoSyncSystemFolderSort ? "true" : "false").Append(",\n");
+                sb.Append("  \"rememberFolderSortByDefault\": ").Append(_rememberFolderSortByDefault ? "true" : "false").Append(",\n");
+                sb.Append("  \"folders\": {");
+
+                lock (_folderSortsLock)
+                {
+                    List<string> keys = new List<string>(_folderSorts.Keys);
+                    keys.Sort(StringComparer.OrdinalIgnoreCase);
+                    bool first = true;
+                    foreach (string k in keys)
+                    {
+                        FolderSortSetting st = _folderSorts[k];
+                        if (st == null) continue;
+                        string normKey = NormalizeFolderKey(k);
+                        if (string.IsNullOrEmpty(normKey)) continue;
+                        if (!first) sb.Append(",");
+                        first = false;
+                        sb.Append("\n    \"").Append(EscapeJsonString(normKey)).Append("\": { ");
+                        sb.Append("\"field\": \"").Append(st.Field.ToString()).Append("\", ");
+                        sb.Append("\"descending\": ").Append(st.Descending ? "true" : "false").Append(", ");
+                        sb.Append("\"foldersFirst\": ").Append(st.FoldersFirst ? "true" : "false").Append(", ");
+                        sb.Append("\"remember\": ").Append(st.Remember ? "true" : "false").Append(" }");
+                    }
+                }
+
+                sb.Append("\n  }\n}\n");
+                string tmpPath = FOLDER_SORTS_PATH + ".tmp";
+                File.WriteAllText(tmpPath, sb.ToString(), new UTF8Encoding(false));
+                if (File.Exists(FOLDER_SORTS_PATH))
+                {
+                    File.Copy(tmpPath, FOLDER_SORTS_PATH, true);
+                    try { File.Delete(tmpPath); } catch { }
+                }
+                else
+                {
+                    File.Move(tmpPath, FOLDER_SORTS_PATH);
+                }
+            }
+            catch { }
+        }
+
         private void CycleSortField()
         {
+            if (_isUpdatingSortUi) return;
             SortField next = SortField.Name;
             if (_sortField == SortField.Name) next = SortField.CreatedTime;
             else if (_sortField == SortField.CreatedTime) next = SortField.ModifiedTime;
@@ -3062,25 +3704,62 @@ namespace DshGalleryExplorer
 
         private void ToggleSortDirection()
         {
+            if (_isUpdatingSortUi) return;
             ApplySort(_sortField, !_sortDescending, true);
         }
 
         private void UpdateSortButtonsUI()
         {
-            string fieldLabel = "名称";
-            if (_sortField == SortField.CreatedTime) fieldLabel = "创建时间";
-            else if (_sortField == SortField.ModifiedTime) fieldLabel = "修改时间";
-            else if (_sortField == SortField.Size) fieldLabel = "大小";
-            else if (_sortField == SortField.Tag) fieldLabel = "标签";
+            if (_isUpdatingSortUi) return;
+            _isUpdatingSortUi = true;
+            try
+            {
+                string fieldLabel = "名称";
+                if (_sortField == SortField.CreatedTime) fieldLabel = "创建时间";
+                else if (_sortField == SortField.ModifiedTime) fieldLabel = "修改时间";
+                else if (_sortField == SortField.Size) fieldLabel = "大小";
+                else if (_sortField == SortField.Tag) fieldLabel = "标签";
 
-            if (_btnSortMode != null) _btnSortMode.Text = "⇅ 排序: " + fieldLabel;
-            if (_btnSortDir != null) _btnSortDir.Text = _sortDescending ? "↓ 降序" : "↑ 升序";
+                if (_btnSortMode != null) _btnSortMode.Text = "⇅ 排序: " + fieldLabel;
+                if (_btnSortDir != null) _btnSortDir.Text = _sortDescending ? "↓ 降序" : "↑ 升序";
+
+                if (_miRememberCurrentFolderSort != null) _miRememberCurrentFolderSort.Checked = IsCurrentFolderSortRemembered();
+                if (_miAutoSyncSystemSort != null) _miAutoSyncSystemSort.Checked = _autoSyncSystemFolderSort;
+                if (_miSortByName != null) _miSortByName.Checked = (_sortField == SortField.Name);
+                if (_miSortByCreated != null) _miSortByCreated.Checked = (_sortField == SortField.CreatedTime);
+                if (_miSortByModified != null) _miSortByModified.Checked = (_sortField == SortField.ModifiedTime);
+                if (_miSortBySize != null) _miSortBySize.Checked = (_sortField == SortField.Size);
+                if (_miSortByTag != null) _miSortByTag.Checked = (_sortField == SortField.Tag);
+                if (_miSortAsc != null) _miSortAsc.Checked = !_sortDescending;
+                if (_miSortDesc != null) _miSortDesc.Checked = _sortDescending;
+                if (_miSortFoldersFirst != null) _miSortFoldersFirst.Checked = _sortFoldersFirst;
+            }
+            finally
+            {
+                _isUpdatingSortUi = false;
+            }
         }
 
-        private void ApplySort(SortField field, bool descending, bool refreshNow = true)
+        internal void ApplySortForTest(SortField field, bool descending)
+        {
+            ApplySort(field, descending, true, true);
+        }
+
+        internal bool VerifyCurrentSortForTest(SortField expectedField, bool expectedDesc)
+        {
+            return _sortField == expectedField && _sortDescending == expectedDesc && IsCurrentFolderSortRemembered();
+        }
+
+        private void ApplySort(SortField field, bool descending, bool refreshNow = true, bool persistSetting = true)
         {
             _sortField = field;
             _sortDescending = descending;
+            if (persistSetting)
+            {
+                _defaultSortField = field;
+                _defaultSortDescending = descending;
+                PersistCurrentFolderSort();
+            }
             UpdateSortButtonsUI();
 
             if (refreshNow)
@@ -3334,6 +4013,24 @@ namespace DshGalleryExplorer
                         if (item.IsFolder) Directory.Move(item.FullPath, newPath);
                         else File.Move(item.FullPath, newPath);
 
+                        if (item.IsFolder)
+                        {
+                            string oldKey = NormalizeFolderKey(item.FullPath);
+                            string newKey = NormalizeFolderKey(newPath);
+                            bool sortMoved = false;
+                            lock (_folderSortsLock)
+                            {
+                                FolderSortSetting st;
+                                if (!string.IsNullOrEmpty(oldKey) && _folderSorts.TryGetValue(oldKey, out st))
+                                {
+                                    _folderSorts.Remove(oldKey);
+                                    if (!string.IsNullOrEmpty(newKey)) _folderSorts[newKey] = st;
+                                    sortMoved = true;
+                                }
+                            }
+                            if (sortMoved) SaveFolderSortsToDisk();
+                        }
+
                         lock (_ledgerLock)
                         {
                             _ledgerMap.Remove(item.FullPath);
@@ -3424,14 +4121,110 @@ namespace DshGalleryExplorer
             return new List<SidebarShortcutEntry>
             {
                 new SidebarShortcutEntry { Label = "🎨 画师素材库 (F:\\Openclow)", TargetPath = @"F:\Openclow\画师素材库" },
-                new SidebarShortcutEntry { Label = "📦 归档库 (V:\\归档)", TargetPath = ARCHIVE_ROOT },
+                new SidebarShortcutEntry { Label = "📦 归档库 (" + _archiveRoot + ")", TargetPath = _archiveRoot },
                 new SidebarShortcutEntry { Label = "📁 DeepSeek H 工作区", TargetPath = @"F:\DeepSeek H" },
                 new SidebarShortcutEntry { Label = "💻 桌面 (Desktop)", TargetPath = Environment.GetFolderPath(Environment.SpecialFolder.Desktop) },
                 new SidebarShortcutEntry { Label = "💿 C:\\ 盘", TargetPath = @"C:\" },
+                new SidebarShortcutEntry { Label = "💿 D:\\ 盘", TargetPath = @"D:\" },
                 new SidebarShortcutEntry { Label = "💿 E:\\ 盘", TargetPath = @"E:\" },
                 new SidebarShortcutEntry { Label = "💿 F:\\ 盘", TargetPath = @"F:\" },
                 new SidebarShortcutEntry { Label = "💿 V:\\ 盘", TargetPath = @"V:\" }
             };
+        }
+
+        private void LoadArchiveRootFromDisk()
+        {
+            try
+            {
+                if (File.Exists(ARCHIVE_CONFIG_PATH))
+                {
+                    string saved = (File.ReadAllText(ARCHIVE_CONFIG_PATH, Encoding.UTF8) ?? "").Trim();
+                    if (!string.IsNullOrEmpty(saved))
+                    {
+                        _archiveRoot = saved;
+                    }
+                }
+            }
+            catch { }
+        }
+
+        private void SaveArchiveRootToDisk()
+        {
+            try
+            {
+                string dir = Path.GetDirectoryName(ARCHIVE_CONFIG_PATH);
+                if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir)) Directory.CreateDirectory(dir);
+                File.WriteAllText(ARCHIVE_CONFIG_PATH, _archiveRoot, new UTF8Encoding(false));
+            }
+            catch { }
+        }
+
+        private void UpdateArchiveRootUI()
+        {
+            if (_btnArchiveConfig != null) _btnArchiveConfig.Text = "📦 归档库: " + _archiveRoot;
+            if (_legendLabel != null)
+            {
+                _legendLabel.Text = "Ctrl+Q/W/E/R [红/橙/黄/绿]  |  Ctrl+T [归档 " + _archiveRoot + "]  |  长按左键 [框选/拖拽]  |  右键 [菜单/排序]";
+            }
+            if (_miArchiveToggle != null)
+            {
+                _miArchiveToggle.Text = "📦 移入 / 复原 " + _archiveRoot + " (Ctrl+T)";
+            }
+        }
+
+        private void PromptCustomArchiveRoot()
+        {
+            using (PathEditorDialog dlg = new PathEditorDialog("自定义归档库路径 (Ctrl+T 归档目标目录)", "", _archiveRoot, false))
+            {
+                if (dlg.ShowDialog(this) == DialogResult.OK && !string.IsNullOrEmpty(dlg.EditedPath))
+                {
+                    string oldArchive = _archiveRoot;
+                    string newArchive = dlg.EditedPath.Trim();
+                    try { newArchive = Path.GetFullPath(newArchive).TrimEnd('\\', '/'); } catch { }
+                    if (newArchive.Length == 2 && newArchive[1] == ':') newArchive += "\\";
+
+                    _archiveRoot = newArchive;
+                    SaveArchiveRootToDisk();
+                    try
+                    {
+                        if (!Directory.Exists(_archiveRoot)) Directory.CreateDirectory(_archiveRoot);
+                    }
+                    catch { }
+
+                    // 同步更新左侧快捷栏中的归档库项
+                    bool updatedShortcut = false;
+                    foreach (SidebarShortcutEntry sc in _customShortcuts)
+                    {
+                        if (sc != null && !sc.IsSeparator && string.IsNullOrEmpty(sc.TagFilterKey))
+                        {
+                            if (string.Equals(sc.TargetPath, oldArchive, StringComparison.OrdinalIgnoreCase) ||
+                                (sc.Label != null && sc.Label.IndexOf("归档库", StringComparison.OrdinalIgnoreCase) >= 0))
+                            {
+                                sc.TargetPath = _archiveRoot;
+                                sc.Label = "📦 归档库 (" + _archiveRoot + ")";
+                                updatedShortcut = true;
+                            }
+                        }
+                    }
+                    if (!updatedShortcut)
+                    {
+                        _customShortcuts.Insert(Math.Min(1, _customShortcuts.Count), new SidebarShortcutEntry
+                        {
+                            Label = "📦 归档库 (" + _archiveRoot + ")",
+                            TargetPath = _archiveRoot
+                        });
+                    }
+                    SaveShortcutsToDisk();
+                    RebuildSidebarItems();
+                    UpdateArchiveRootUI();
+
+                    if (_grid != null)
+                    {
+                        Point pt = _grid.PointToClient(Cursor.Position);
+                        _grid.ShowInstantHud(pt, "📦 归档库路径已更新", _archiveRoot, Color.FromArgb(0, 153, 188));
+                    }
+                }
+            }
         }
 
         private void LoadShortcutsFromDisk()
@@ -3544,7 +4337,10 @@ namespace DshGalleryExplorer
                     }
                 }
             });
-            _sidebarContextMenu.Items.Add("✏️ 重命名此快捷路径", null, (s, e) => RenameSelectedSidebarShortcut());
+            _sidebarContextMenu.Items.Add("📦 自定义归档库路径 (Ctrl+T 目标)...", null, (s, e) => PromptCustomArchiveRoot());
+            _sidebarContextMenu.Items.Add(new ToolStripSeparator());
+            _sidebarContextMenu.Items.Add("✏️ 编辑此快捷路径 (名称与路径)...", null, (s, e) => EditSelectedSidebarShortcut());
+            _sidebarContextMenu.Items.Add("✏️ 仅重命名此快捷路径", null, (s, e) => RenameSelectedSidebarShortcut());
             _sidebarContextMenu.Items.Add("⬆️ 上移此快捷路径", null, (s, e) => MoveSelectedSidebarShortcut(-1));
             _sidebarContextMenu.Items.Add("⬇️ 下移此快捷路径", null, (s, e) => MoveSelectedSidebarShortcut(1));
             _sidebarContextMenu.Items.Add("➖ 移除选中的快捷路径 (Delete)", null, (s, e) => RemoveSelectedSidebarShortcut());
@@ -3621,6 +4417,31 @@ namespace DshGalleryExplorer
             }
         }
 
+        private void EditSelectedSidebarShortcut()
+        {
+            if (_sidebarList == null) return;
+            SidebarShortcutEntry sel = _sidebarList.SelectedItem as SidebarShortcutEntry;
+            if (sel == null || sel.IsSeparator || !string.IsNullOrEmpty(sel.TagFilterKey)) return;
+            bool isArchiveShortcut = string.Equals(sel.TargetPath, _archiveRoot, StringComparison.OrdinalIgnoreCase) ||
+                                     (sel.Label != null && sel.Label.IndexOf("归档库", StringComparison.OrdinalIgnoreCase) >= 0);
+            using (PathEditorDialog dlg = new PathEditorDialog("编辑快捷路径", sel.Label, sel.TargetPath, true))
+            {
+                if (dlg.ShowDialog(this) == DialogResult.OK && !string.IsNullOrEmpty(dlg.EditedPath))
+                {
+                    sel.Label = !string.IsNullOrEmpty(dlg.EditedLabel) ? dlg.EditedLabel : ("📌 " + Path.GetFileName(dlg.EditedPath.TrimEnd('\\', '/')));
+                    sel.TargetPath = dlg.EditedPath.Trim();
+                    if (isArchiveShortcut)
+                    {
+                        _archiveRoot = sel.TargetPath;
+                        SaveArchiveRootToDisk();
+                        UpdateArchiveRootUI();
+                    }
+                    SaveShortcutsToDisk();
+                    RebuildSidebarItems();
+                }
+            }
+        }
+
         private void RenameSelectedSidebarShortcut()
         {
             if (_sidebarList == null) return;
@@ -3684,13 +4505,21 @@ namespace DshGalleryExplorer
 
             if (!string.IsNullOrEmpty(entry.TargetPath))
             {
-                if (string.Equals(entry.TargetPath, ARCHIVE_ROOT, StringComparison.OrdinalIgnoreCase) && !Directory.Exists(ARCHIVE_ROOT))
+                if (string.Equals(entry.TargetPath, _archiveRoot, StringComparison.OrdinalIgnoreCase) && !Directory.Exists(_archiveRoot))
                 {
-                    try { Directory.CreateDirectory(ARCHIVE_ROOT); } catch { }
+                    try { Directory.CreateDirectory(_archiveRoot); } catch { }
                 }
                 if (Directory.Exists(entry.TargetPath))
                 {
                     NavigateTo(entry.TargetPath, true);
+                }
+                else if (string.Equals(entry.TargetPath, _archiveRoot, StringComparison.OrdinalIgnoreCase) ||
+                         (entry.Label != null && entry.Label.IndexOf("归档库", StringComparison.OrdinalIgnoreCase) >= 0))
+                {
+                    if (MessageBox.Show(this, "当前归档库路径 \"" + entry.TargetPath + "\" 不存在，是否立即自定义新的归档库路径？", "归档库路径配置", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
+                    {
+                        PromptCustomArchiveRoot();
+                    }
                 }
             }
         }
@@ -3760,10 +4589,7 @@ namespace DshGalleryExplorer
             _addressBox.Text = _currentDirectory;
             _isInitialized = true;
 
-            if (_autoSyncSystemFolderSort)
-            {
-                TryApplyExplorerSortForDirectory(_currentDirectory);
-            }
+            RestoreOrDetermineSortForDirectory(_currentDirectory);
 
             int restoreScroll = 0;
             string restoreSel = explicitSelectedPath;
@@ -3890,7 +4716,7 @@ namespace DshGalleryExplorer
 
                     if (isDir)
                     {
-                        if ((fsi.Attributes & FileAttributes.Hidden) != 0 && fsi.FullName != "V:\\归档") continue;
+                        if ((fsi.Attributes & FileAttributes.Hidden) != 0 && !string.Equals(fsi.FullName, _archiveRoot, StringComparison.OrdinalIgnoreCase)) continue;
                         list.Add(new EntryItem
                         {
                             FullPath = fsi.FullName,
@@ -4032,7 +4858,16 @@ namespace DshGalleryExplorer
                 string ext = Path.GetExtension(item.FullPath).ToLowerInvariant();
                 if (Array.IndexOf(IMAGE_EXTS, ext) >= 0)
                 {
-                    FastImageViewerForm viewer = new FastImageViewerForm(item.FullPath);
+                    List<string> orderedImgs = new List<string>();
+                    if (_grid != null && _grid.Items != null)
+                    {
+                        foreach (EntryItem it in _grid.Items)
+                        {
+                            if (it != null && !it.IsFolder && Array.IndexOf(IMAGE_EXTS, Path.GetExtension(it.FullPath).ToLowerInvariant()) >= 0)
+                                orderedImgs.Add(it.FullPath);
+                        }
+                    }
+                    FastImageViewerForm viewer = new FastImageViewerForm(item.FullPath, orderedImgs);
                     viewer.Show(this);
                 }
                 else if (VirtualGridCanvas.IsVideoExtension(ext))
@@ -4164,7 +4999,17 @@ namespace DshGalleryExplorer
 
         private void ExecuteBatchArchiveToggle(List<EntryItem> items, Point cursorClient)
         {
-            string normArchivePrefix = Path.GetFullPath(ARCHIVE_ROOT).TrimEnd('\\') + "\\";
+            try
+            {
+                if (!Directory.Exists(_archiveRoot)) Directory.CreateDirectory(_archiveRoot);
+            }
+            catch
+            {
+                PromptCustomArchiveRoot();
+                if (!Directory.Exists(_archiveRoot)) return;
+            }
+
+            string normArchivePrefix = Path.GetFullPath(_archiveRoot).TrimEnd('\\') + "\\";
             List<EntryItem> removedItems = new List<EntryItem>();
             string lastDest = "";
             bool isRestore = false;
@@ -4191,7 +5036,7 @@ namespace DshGalleryExplorer
                 {
                     char driveLetter = char.ToUpperInvariant(fullP[0]);
                     string rel = fullP.Substring(3);
-                    string destPath = Path.Combine(ARCHIVE_ROOT, driveLetter + "盘", rel);
+                    string destPath = Path.Combine(_archiveRoot, driveLetter + "盘", rel);
                     removedItems.Add(item);
                     lastDest = destPath;
                     isRestore = false;
@@ -4204,7 +5049,7 @@ namespace DshGalleryExplorer
                 _grid.RemoveItems(removedItems);
                 string title = isRestore
                     ? string.Format("↩️ 已复原 {0} 项至原位置", removedItems.Count)
-                    : string.Format("📦 已移入 V:\\归档 ({0} 项)", removedItems.Count);
+                    : string.Format("📦 已移入 {0} ({1} 项)", _archiveRoot, removedItems.Count);
                 _grid.ShowInstantHud(cursorClient, title, lastDest, Color.FromArgb(0, 153, 188));
             }
         }
@@ -4265,6 +5110,20 @@ namespace DshGalleryExplorer
                         ClearReadOnlySystemRecursive(src);
                         Directory.Delete(src, true);
                     }
+                    string oldKey = NormalizeFolderKey(src);
+                    string newKey = NormalizeFolderKey(dest);
+                    bool sortMoved = false;
+                    lock (_folderSortsLock)
+                    {
+                        FolderSortSetting st;
+                        if (!string.IsNullOrEmpty(oldKey) && _folderSorts.TryGetValue(oldKey, out st))
+                        {
+                            _folderSorts.Remove(oldKey);
+                            if (!string.IsNullOrEmpty(newKey)) _folderSorts[newKey] = st;
+                            sortMoved = true;
+                        }
+                    }
+                    if (sortMoved) SaveFolderSortsToDisk();
                 }
                 else if (File.Exists(src))
                 {
@@ -4610,14 +5469,69 @@ namespace DshGalleryExplorer
         [DllImport("winmm.dll")]
         private static extern uint timeEndPeriod(uint uPeriod);
 
+        public static int RunSortSelfTest()
+        {
+            string k1 = MainWindow.NormalizeFolderKey(@"F:\Openclow\画师素材库\");
+            string k2 = MainWindow.NormalizeFolderKey(@"f:\OPENCLOW\画师素材库");
+            string k3 = MainWindow.NormalizeFolderKey(@"F:/Openclow/画师素材库///");
+            if (k1 != k2 || k2 != k3 || k1 != @"f:\openclow\画师素材库") return 10;
+
+            string u1 = MainWindow.NormalizeFolderKey(@"F:\Openclow\users_test\x01_artist\");
+            string u2 = MainWindow.NormalizeFolderKey(@"f:\openclow\users_test\x01_artist");
+            if (u1 != u2 || u1 != @"f:\openclow\users_test\x01_artist") return 12;
+
+            string root1 = MainWindow.NormalizeFolderKey(@"F:\");
+            string root2 = MainWindow.NormalizeFolderKey(@"f:");
+            if (root1 != root2 || root1 != @"f:\") return 11;
+
+            string dirA = Directory.Exists(@"F:\Openclow\画师素材库") ? @"F:\Openclow\画师素材库" : Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
+            string dirB = Directory.Exists(@"F:\DeepSeek H") ? @"F:\DeepSeek H" : Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+
+            string backup = null;
+            string sortPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), @".dsh\gallery_cache\_dsh_folder_sorts.json");
+            if (File.Exists(sortPath)) backup = File.ReadAllText(sortPath, Encoding.UTF8);
+
+            try
+            {
+                using (MainWindow w1 = new MainWindow(dirA))
+                {
+                    w1.NavigateTo(dirA + "\\", false);
+                    w1.ApplySortForTest(MainWindow.SortField.ModifiedTime, true);
+                    w1.NavigateTo(dirB, true);
+                    w1.ApplySortForTest(MainWindow.SortField.Size, false);
+                    w1.NavigateTo(dirA.ToLowerInvariant(), true);
+                    if (!w1.VerifyCurrentSortForTest(MainWindow.SortField.ModifiedTime, true)) return 20;
+                }
+
+                // New instance (simulating full app restart)
+                using (MainWindow w2 = new MainWindow(dirB + "\\"))
+                {
+                    if (!w2.VerifyCurrentSortForTest(MainWindow.SortField.Size, false)) return 21;
+                    w2.NavigateTo(dirA, true);
+                    if (!w2.VerifyCurrentSortForTest(MainWindow.SortField.ModifiedTime, true)) return 22;
+                }
+            }
+            finally
+            {
+                if (backup != null) File.WriteAllText(sortPath, backup, new UTF8Encoding(false));
+                else if (File.Exists(sortPath)) File.Delete(sortPath);
+            }
+            return 0;
+        }
+
         [STAThread]
-        public static void Main(string[] args)
+        public static int Main(string[] args)
         {
             try { SetProcessDpiAwarenessContext((IntPtr)(-4)); }
             catch
             {
                 try { SetProcessDpiAwareness(2); }
                 catch { try { SetProcessDPIAware(); } catch { } }
+            }
+
+            if (args != null && args.Length > 0 && string.Equals(args[0], "--self-test-sort", StringComparison.OrdinalIgnoreCase))
+            {
+                return RunSortSelfTest();
             }
 
             try { timeBeginPeriod(1); } catch { }
@@ -4627,6 +5541,7 @@ namespace DshGalleryExplorer
                 Application.SetCompatibleTextRenderingDefault(false);
                 string initPath = args != null && args.Length > 0 ? args[0] : null;
                 Application.Run(new MainWindow(initPath));
+                return 0;
             }
             finally
             {

@@ -1,4 +1,4 @@
-$ErrorActionPreference = 'Stop'
+﻿$ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $Host.UI.RawUI.WindowTitle = "DshGalleryExplorer - 一键编译并上传更新到 GitHub"
@@ -110,12 +110,19 @@ try {
     git remote set-url origin $cleanRemoteUrl
 }
 
-# 同步覆盖到系统标准程序目录 AppData\Local\Programs\DshGalleryExplorer
+# 同步覆盖到系统标准程序目录 AppData\Local\Programs\DshGalleryExplorer 以及 .dsh\tools
 $instDir = "$env:LOCALAPPDATA\Programs\DshGalleryExplorer"
 if (-not (Test-Path $instDir)) { New-Item -Path $instDir -ItemType Directory -Force | Out-Null }
 try {
     Copy-Item -LiteralPath "$repoDir\dsh-gallery-explorer.exe" -Destination "$instDir\dsh-gallery-explorer.exe" -Force -ErrorAction SilentlyContinue
 } catch {}
+$liveToolsDir = Join-Path $env:USERPROFILE ".dsh\tools"
+if (Test-Path $liveToolsDir) {
+    try {
+        Copy-Item -LiteralPath "$repoDir\dsh-gallery-explorer.cs" -Destination "$liveToolsDir\dsh-gallery-explorer.cs" -Force -ErrorAction SilentlyContinue
+        Copy-Item -LiteralPath "$repoDir\dsh-gallery-explorer.exe" -Destination "$liveToolsDir\dsh-gallery-explorer.exe" -Force -ErrorAction SilentlyContinue
+    } catch {}
+}
 
 # 4. 打包并同步更新 GitHub Release (v1.0.0) 附件
 if ($token) {
