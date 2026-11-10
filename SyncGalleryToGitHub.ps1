@@ -1,7 +1,11 @@
+﻿param(
+    [switch]$Force,
+    [switch]$NoPause
+)
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-$Host.UI.RawUI.WindowTitle = "DshGalleryExplorer - 一键编译并上传更新到 GitHub"
+$Host.UI.RawUI.WindowTitle = "DshGalleryExplorer - 一键编译并推送到 GitHub（带防旧版本倒灌云端保护）"
 
 $repoDir = $PSScriptRoot
 $zipPath = Join-Path $repoDir "DshGalleryExplorer_Release.zip"
@@ -9,10 +13,38 @@ $login = "Boccp"
 $repoName = "DshGalleryExplorer"
 
 Write-Host "=========================================================" -ForegroundColor Cyan
-Write-Host "   DshGalleryExplorer 一键编译 + 本机同步 + GitHub 上传" -ForegroundColor Cyan
+Write-Host "   DshGalleryExplorer 版本防呆检测 + 编译 + 推送到 GitHub" -ForegroundColor Cyan
 Write-Host "=========================================================" -ForegroundColor Cyan
 Write-Host "当前仓库目录: $repoDir" -ForegroundColor Gray
 Write-Host ""
+
+function Pause-IfNeeded([int]$sec = 3) {
+    if (-not $NoPause) { Start-Sleep -Seconds $sec }
+}
+
+function Parse-SemVer([string]$verText) {
+    if ([string]::IsNullOrWhiteSpace($verText)) { return [version]"0.0.0.0" }
+    $clean = $verText.Trim().TrimStart('v', 'V')
+    if ($clean -match '(\d+\.\d+(?:\.\d+){0,2})') {
+        $vStr = $matches[1]
+        $parts = $vStr.Split('.')
+        while ($parts.Count -lt 4) { $parts += "0" }
+        try { return [version]($parts[0..3] -join '.') } catch {}
+    }
+    return [version]"0.0.0.0"
+}
+
+function Get-GitBlobSha([string]$filePath) {
+    if (-not (Test-Path $filePath)) { return "" }
+    $bytes = [System.IO.File]::ReadAllBytes($filePath)
+    $header = [System.Text.Encoding]::ASCII.GetBytes("blob $($bytes.Length)`0")
+    $combined = New-Object byte[] ($header.Length + $bytes.Length)
+    [System.Array]::Copy($header, 0, $combined, 0, $header.Length)
+    [System.Array]::Copy($bytes, 0, $combined, $header.Length, $bytes.Length)
+    $sha1 = [System.Security.Cryptography.SHA1]::Create()
+    $hashBytes = $sha1.ComputeHash($combined)
+    return ($hashBytes | ForEach-Object { $_.ToString("x2") }) -join ""
+}
 
 Set-Location $repoDir
 
@@ -20,36 +52,23 @@ $appVer = "1.0.0"
 if (Test-Path "$repoDir\version.txt") {
     $appVer = (Get-Content "$repoDir\version.txt" -Raw -Encoding UTF8).Trim()
 }
-$tagName = "v$appVer"
+$localVer = Parse-SemVer $appVer
+$tagName = "v$($localVer.ToString(3))"
 
-$csc = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
-$wpfDir = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\WPF"
-$netDir = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319"
+$proxy = $null
+try {
+    $tcp = New-Object System.Net.Sockets.TcpClient
+    $ar = $tcp.BeginConnect("127.0.0.1", 7897, $null, $null)
+    if ($ar.AsyncWaitHandle.WaitOne(300, $false) -and $tcp.Connected) { $proxy = "http://127.0.0.1:7897" }
+    $tcp.Close()
+} catch {}
 
-Write-Host "[1/3] 正在编译 dsh-gallery-explorer.exe ($tagName) ..." -ForegroundColor Yellow
-Get-Process -Name "dsh-gallery-explorer" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-Start-Sleep -Milliseconds 200
-
-& $csc /nologo /target:winexe /optimize+ /out:"$repoDir\dsh-gallery-explorer.exe" `
-    /r:System.dll /r:System.Core.dll /r:System.Drawing.dll /r:System.Windows.Forms.dll `
-    /r:"$wpfDir\PresentationCore.dll" /r:"$wpfDir\PresentationFramework.dll" /r:"$wpfDir\WindowsBase.dll" /r:"$netDir\System.Xaml.dll" `
-    "$repoDir\dsh-gallery-explorer.cs"
-if ($LASTEXITCODE -ne 0) { throw "dsh-gallery-explorer.exe 编译失败！" }
-
-# 确保清理 RUNASADMIN 兼容层标记，防止弹出 UAC 确认框
-$compatReg = "HKCU:\Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers"
-if (Test-Path $compatReg) {
-    Remove-ItemProperty -Path $compatReg -Name "$repoDir\dsh-gallery-explorer.exe" -ErrorAction SilentlyContinue
-}
-Write-Host "      -> 编译完成。" -ForegroundColor Green
-
-Write-Host "[2/3] 正在读取本机 GitHub ($login) 授权凭证 ..." -ForegroundColor Yellow
+Write-Host "[1/4] 正在读取本机 GitHub ($login) 授权凭证并执行防倒灌版本校验 ..." -ForegroundColor Yellow
 $token = $env:GITHUB_TOKEN
 $tokenFile = Join-Path $repoDir ".github_token"
 if (-not $token -and (Test-Path $tokenFile)) {
     $token = (Get-Content $tokenFile -Raw -Encoding UTF8).Trim()
 }
-
 if (-not $token) {
     $gcmCandidates = @(
         "C:\Users\Administrator\AppData\Local\hermes\tools\git-2.53.0+3-win32-x64\mingw64\bin\git-credential-manager.exe",
@@ -63,10 +82,7 @@ if (-not $token) {
                 $credInput = "protocol=https`nhost=github.com`nusername=$login`n`n"
                 $credLines = $credInput | & $gcm get 2>&1
                 foreach ($line in $credLines) {
-                    if ($line -match '^password=(.+)$') {
-                        $token = $matches[1].Trim()
-                        break
-                    }
+                    if ($line -match '^password=(.+)$') { $token = $matches[1].Trim(); break }
                 }
             } catch {}
             if ($token) { break }
@@ -74,15 +90,101 @@ if (-not $token) {
     }
 }
 
-if (-not (Test-Path "$repoDir\.git")) {
-    git init -b main | Out-Null
-    git remote add origin "https://github.com/$login/$repoName.git" 2>$null
+$headers = @{
+    Accept = "application/vnd.github+json"
+    "User-Agent" = "DshGalleryExplorer-Publisher"
 }
+if ($token) { $headers["Authorization"] = "Bearer $token" }
+$invokeParams = @{ Headers = $headers }
+if ($proxy) { $invokeParams["Proxy"] = $proxy }
+
+# 远端版本与 Commit 防倒灌检查
+$remoteCommitSha = ""
+$remoteCsBlobSha = ""
+$remoteVer = [version]"1.0.0.0"
+try {
+    $commits = Invoke-RestMethod -Method Get -Uri "https://api.github.com/repos/$login/$repoName/commits?per_page=1" @invokeParams
+    $remoteCommitSha = $commits[0].sha
+    $remoteCommitTimeUtc = [datetime]::Parse($commits[0].commit.committer.date).ToUniversalTime()
+    $tree = Invoke-RestMethod -Method Get -Uri "https://api.github.com/repos/$login/$repoName/git/trees/$remoteCommitSha`?recursive=1" @invokeParams
+    foreach ($item in $tree.tree) {
+        if ($item.path -eq "dsh-gallery-explorer.cs") { $remoteCsBlobSha = $item.sha }
+        if ($item.path -eq "version.txt") {
+            $blob = Invoke-RestMethod -Method Get -Uri $item.url @invokeParams
+            $text = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($blob.content))
+            $v = Parse-SemVer $text
+            if ($v -gt $remoteVer) { $remoteVer = $v }
+        }
+    }
+} catch {}
+
+$localCsSha = Get-GitBlobSha "$repoDir\dsh-gallery-explorer.cs"
+$gitStatus = git status --porcelain 2>$null
+
+if (-not $Force -and $remoteCommitSha) {
+    if ($remoteVer -gt $localVer) {
+        Write-Host "⛔ [防倒灌拦截] 云端版本 (v$($remoteVer.ToString(3))) 高于本地版本 (v$($localVer.ToString(3)))！禁止用旧版本强推覆盖云端！" -ForegroundColor Red
+        Write-Host "   请先执行「从 GitHub 拉取更新到本地」。" -ForegroundColor Yellow
+        Pause-IfNeeded 4
+        exit 0
+    }
+    if ($localCsSha -eq $remoteCsBlobSha -and -not $gitStatus) {
+        $localHead = (git rev-parse HEAD 2>$null).Trim()
+        if ($localHead -eq $remoteCommitSha) {
+            Write-Host "✅ [防重复推送拦截] 本地源码与 GitHub 云端 ($($remoteCommitSha.Substring(0,7))) 完全一致，无任何新改动需要推送。" -ForegroundColor Green
+            Pause-IfNeeded 2
+            exit 0
+        }
+    }
+    # 检查云端是否有本地尚未拉取的新 Commit
+    try {
+        git fetch origin main --quiet 2>$null
+        $localHead = (git rev-parse HEAD 2>$null).Trim()
+        if ($localHead -and $localHead -ne $remoteCommitSha) {
+            git merge-base --is-ancestor $remoteCommitSha HEAD 2>$null
+            if ($LASTEXITCODE -ne 0) {
+                Write-Host "⛔ [防倒灌拦截] GitHub 云端存在本地尚未拉取的新提交 ($($remoteCommitSha.Substring(0,7)))！" -ForegroundColor Red
+                Write-Host "   为防止强推抹掉云端新记录，请先运行「从 GitHub 拉取更新到本地」或使用 -Force。" -ForegroundColor Yellow
+                Pause-IfNeeded 4
+                exit 0
+            }
+        }
+    } catch {}
+}
+
+$csc = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
+$wpfDir = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\WPF"
+$netDir = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319"
+
+Write-Host "[2/4] 正在编译 dsh-gallery-explorer.exe ($tagName) 并同步本机运行目录 ..." -ForegroundColor Yellow
+Get-Process -Name "dsh-gallery-explorer" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+Start-Sleep -Milliseconds 200
+
+& $csc /nologo /target:winexe /optimize+ /out:"$repoDir\dsh-gallery-explorer.exe" `
+    /r:System.dll /r:System.Core.dll /r:System.Drawing.dll /r:System.Windows.Forms.dll `
+    /r:"$wpfDir\PresentationCore.dll" /r:"$wpfDir\PresentationFramework.dll" /r:"$wpfDir\WindowsBase.dll" /r:"$netDir\System.Xaml.dll" `
+    "$repoDir\dsh-gallery-explorer.cs"
+if ($LASTEXITCODE -ne 0) { throw "dsh-gallery-explorer.exe 编译失败！" }
+
+$compatReg = "HKCU:\Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers"
+if (Test-Path $compatReg) {
+    Remove-ItemProperty -Path $compatReg -Name "$repoDir\dsh-gallery-explorer.exe" -ErrorAction SilentlyContinue
+}
+
+$instDir = "$env:LOCALAPPDATA\Programs\DshGalleryExplorer"
+if (-not (Test-Path $instDir)) { New-Item -Path $instDir -ItemType Directory -Force | Out-Null }
+Copy-Item -LiteralPath "$repoDir\dsh-gallery-explorer.exe" -Destination "$instDir\dsh-gallery-explorer.exe" -Force -ErrorAction SilentlyContinue
+$liveToolsDir = Join-Path $env:USERPROFILE ".dsh\tools"
+if (Test-Path $liveToolsDir) {
+    Copy-Item -LiteralPath "$repoDir\dsh-gallery-explorer.cs" -Destination "$liveToolsDir\dsh-gallery-explorer.cs" -Force -ErrorAction SilentlyContinue
+    Copy-Item -LiteralPath "$repoDir\dsh-gallery-explorer.exe" -Destination "$liveToolsDir\dsh-gallery-explorer.exe" -Force -ErrorAction SilentlyContinue
+}
+Write-Host "      -> 编译与本机部署完成。" -ForegroundColor Green
 
 git config user.name $login
 git config user.email "$login@users.noreply.github.com"
 
-Write-Host "[3/3] 正在提交并推送到 GitHub 仓库 ($login/$repoName) ..." -ForegroundColor Yellow
+Write-Host "[3/4] 正在提交并推送到 GitHub 仓库 ($login/$repoName) ..." -ForegroundColor Yellow
 git add -A
 $status = git status --porcelain
 $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
@@ -98,118 +200,24 @@ if ($token) {
     git remote set-url origin $cleanRemoteUrl
 }
 
-$proxy = $null
 try {
-    $tcp = New-Object System.Net.Sockets.TcpClient
-    $ar = $tcp.BeginConnect("127.0.0.1", 7897, $null, $null)
-    if ($ar.AsyncWaitHandle.WaitOne(300, $false) -and $tcp.Connected) { $proxy = "http://127.0.0.1:7897" }
-    $tcp.Close()
-} catch {}
-
-$gitPushSucceeded = $false
-try {
-    $gitArgs = @("-c", "credential.helper=", "-c", "http.sslBackend=openssl")
-    if ($proxy) {
-        $gitArgs += @("-c", "http.proxy=$proxy", "-c", "https.proxy=$proxy")
+    if ($token) {
+        git -c credential.helper= -c http.sslBackend=openssl push -u origin main --force
+        git -c credential.helper= -c http.sslBackend=openssl push origin $tagName --force
+    } else {
+        git push -u origin main --force
+        git push origin $tagName --force
     }
-    git @gitArgs push -u origin main --force 2>$null
-    if ($LASTEXITCODE -eq 0) {
-        git @gitArgs push origin $tagName --force 2>$null
-        if ($LASTEXITCODE -eq 0) {
-            $gitPushSucceeded = $true
-            Write-Host "      -> Git 直接推送完成。" -ForegroundColor Green
-        }
-    }
-} catch {} finally {
+} finally {
     git remote set-url origin $cleanRemoteUrl
 }
 
-# 如果 github.com:443 直连被重置，自动通过畅通的 api.github.com (GitHub Git Data API) 同步提交树与 main/tag 引用
-if (-not $gitPushSucceeded -and $token) {
-    Write-Host "      -> 检测到 github.com:443 直连受阻，正在通过 api.github.com 同步仓库代码树 ..." -ForegroundColor Cyan
-    $apiHeaders = @{
-        Authorization = "Bearer $token"
-        Accept = "application/vnd.github+json"
-        "X-GitHub-Api-Version" = "2022-11-28"
-        "User-Agent" = "DshGalleryExplorer-Publisher"
-    }
-    $apiParams = @{ Headers = $apiHeaders }
-    if ($proxy) { $apiParams["Proxy"] = $proxy }
+$newHeadSha = (git rev-parse HEAD).Trim()
+Set-Content -Path (Join-Path $repoDir ".last_synced_commit") -Value @($newHeadSha, (Get-Date).ToUniversalTime().ToString("o")) -Encoding UTF8
 
-    $refInfo = Invoke-RestMethod -Method Get -Uri "https://api.github.com/repos/$login/$repoName/git/ref/heads/main" @apiParams
-    $parentCommitSha = $refInfo.object.sha
-    $parentCommit = Invoke-RestMethod -Method Get -Uri "https://api.github.com/repos/$login/$repoName/git/commits/$parentCommitSha" @apiParams
-    $baseTreeSha = $parentCommit.tree.sha
-
-    $trackedFiles = git ls-files
-    $treeEntries = New-Object System.Collections.ArrayList
-    foreach ($relPath in $trackedFiles) {
-        $fullFile = Join-Path $repoDir $relPath
-        if (-not (Test-Path $fullFile)) { continue }
-        $bytes = [System.IO.File]::ReadAllBytes($fullFile)
-        $b64 = [Convert]::ToBase64String($bytes)
-        $blobBody = (@{ content = $b64; encoding = "base64" } | ConvertTo-Json -Compress)
-        $blobResp = Invoke-RestMethod -Method Post -Uri "https://api.github.com/repos/$login/$repoName/git/blobs" -ContentType "application/json; charset=utf-8" -Body $blobBody @apiParams
-        [void]$treeEntries.Add(@{
-            path = ($relPath -replace '\\', '/')
-            mode = "100644"
-            type = "blob"
-            sha  = $blobResp.sha
-        })
-    }
-
-    $treeBody = (@{ base_tree = $baseTreeSha; tree = $treeEntries } | ConvertTo-Json -Depth 5 -Compress)
-    $newTree = Invoke-RestMethod -Method Post -Uri "https://api.github.com/repos/$login/$repoName/git/trees" -ContentType "application/json; charset=utf-8" -Body $treeBody @apiParams
-
-    $commitMsg = "Release & sync DshGalleryExplorer ($timestamp)"
-    $commitBody = (@{
-        message = $commitMsg
-        tree    = $newTree.sha
-        parents = @($parentCommitSha)
-    } | ConvertTo-Json -Depth 4 -Compress)
-    $newCommit = Invoke-RestMethod -Method Post -Uri "https://api.github.com/repos/$login/$repoName/git/commits" -ContentType "application/json; charset=utf-8" -Body $commitBody @apiParams
-
-    $updateRefBody = (@{ sha = $newCommit.sha; force = $true } | ConvertTo-Json -Compress)
-    Invoke-RestMethod -Method Patch -Uri "https://api.github.com/repos/$login/$repoName/git/refs/heads/main" -ContentType "application/json; charset=utf-8" -Body $updateRefBody @apiParams | Out-Null
-    try {
-        Invoke-RestMethod -Method Patch -Uri "https://api.github.com/repos/$login/$repoName/git/refs/tags/$tagName" -ContentType "application/json; charset=utf-8" -Body $updateRefBody @apiParams | Out-Null
-    } catch {}
-    Set-Content -Path (Join-Path $repoDir ".last_synced_commit") -Value $newCommit.sha -NoNewline -Encoding UTF8
-    Write-Host "      -> GitHub 远端 main 分支及 $tagName 标签已同步至 Commit: $($newCommit.sha.Substring(0, 7))" -ForegroundColor Green
-}
-
-# 同步覆盖到系统标准程序目录 AppData\Local\Programs\DshGalleryExplorer 以及 .dsh\tools
-$instDir = "$env:LOCALAPPDATA\Programs\DshGalleryExplorer"
-if (-not (Test-Path $instDir)) { New-Item -Path $instDir -ItemType Directory -Force | Out-Null }
-try {
-    Copy-Item -LiteralPath "$repoDir\dsh-gallery-explorer.exe" -Destination "$instDir\dsh-gallery-explorer.exe" -Force -ErrorAction SilentlyContinue
-} catch {}
-$liveToolsDir = Join-Path $env:USERPROFILE ".dsh\tools"
-if (Test-Path $liveToolsDir) {
-    try {
-        Copy-Item -LiteralPath "$repoDir\dsh-gallery-explorer.cs" -Destination "$liveToolsDir\dsh-gallery-explorer.cs" -Force -ErrorAction SilentlyContinue
-        Copy-Item -LiteralPath "$repoDir\dsh-gallery-explorer.exe" -Destination "$liveToolsDir\dsh-gallery-explorer.exe" -Force -ErrorAction SilentlyContinue
-    } catch {}
-}
-
-# 4. 打包并同步更新 GitHub Release (v1.0.0) 附件
 if ($token) {
     Write-Host "[4/4] 正在同步更新 GitHub Release ($tagName) 安装包附件 ..." -ForegroundColor Yellow
-    $proxy = $null
-    try {
-        $tcp = New-Object System.Net.Sockets.TcpClient
-        $ar = $tcp.BeginConnect("127.0.0.1", 7897, $null, $null)
-        if ($ar.AsyncWaitHandle.WaitOne(300, $false) -and $tcp.Connected) { $proxy = "http://127.0.0.1:7897" }
-        $tcp.Close()
-    } catch {}
-    $headers = @{
-        Authorization = "Bearer $token"
-        Accept = "application/vnd.github+json"
-        "X-GitHub-Api-Version" = "2022-11-28"
-        "User-Agent" = "DshGalleryExplorer-Publisher"
-    }
-    $invokeParams = @{ Headers = $headers }
-    if ($proxy) { $invokeParams["Proxy"] = $proxy }
+    $headers["X-GitHub-Api-Version"] = "2022-11-28"
 
     Add-Type -AssemblyName System.IO.Compression
     Add-Type -AssemblyName System.IO.Compression.FileSystem
@@ -217,7 +225,7 @@ if ($token) {
     if (Test-Path $tempZip) { Remove-Item $tempZip -Force }
     $zipArchive = [System.IO.Compression.ZipFile]::Open($tempZip, [System.IO.Compression.ZipArchiveMode]::Create)
     try {
-        $filesToZip = @("README.md", "dsh-gallery-explorer.cs", "dsh-gallery-explorer.exe", "dsh_file_tags.py", "artist_purity_engine.py", "generate_folder_cover_icons.py", "SyncGalleryToGitHub.ps1", "DownloadGalleryFromGitHub.ps1")
+        $filesToZip = @("README.md", "version.txt", "dsh-gallery-explorer.cs", "dsh-gallery-explorer.exe", "dsh_file_tags.py", "artist_purity_engine.py", "generate_folder_cover_icons.py", "SyncGalleryToGitHub.ps1", "DownloadGalleryFromGitHub.ps1")
         foreach ($f in $filesToZip) {
             $full = Join-Path $repoDir $f
             if (Test-Path $full) {
@@ -249,7 +257,7 @@ if ($token) {
 
 Write-Host ""
 Write-Host "=========================================================" -ForegroundColor Green
-Write-Host " ✅ DshGalleryExplorer 同步上传完成！" -ForegroundColor Green
+Write-Host " ✅ DshGalleryExplorer 同步上传完成！Commit: $($newHeadSha.Substring(0,7))" -ForegroundColor Green
 Write-Host "    https://github.com/Boccp/DshGalleryExplorer" -ForegroundColor White
 Write-Host "=========================================================" -ForegroundColor Green
-Start-Sleep -Seconds 3
+Pause-IfNeeded 3

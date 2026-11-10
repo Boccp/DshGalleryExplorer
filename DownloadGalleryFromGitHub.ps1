@@ -1,17 +1,25 @@
+﻿param(
+    [switch]$Force,
+    [switch]$NoPause
+)
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-$Host.UI.RawUI.WindowTitle = "DshGalleryExplorer - 检查并从 GitHub 下载更新（防旧版本降级保护）"
+$Host.UI.RawUI.WindowTitle = "DshGalleryExplorer - 从 GitHub 拉取更新到本地（带防旧版本降级/防丢改动保护）"
 
 $repoDir = $PSScriptRoot
 $login = "Boccp"
 $repoName = "DshGalleryExplorer"
 
 Write-Host "=========================================================" -ForegroundColor Cyan
-Write-Host "   DshGalleryExplorer 远端版本检测与安全更新下载器" -ForegroundColor Cyan
+Write-Host "   DshGalleryExplorer 远端版本检测与安全拉取部署器" -ForegroundColor Cyan
 Write-Host "=========================================================" -ForegroundColor Cyan
-Write-Host "本地目标目录: $repoDir" -ForegroundColor Gray
+Write-Host "本地仓库目录: $repoDir" -ForegroundColor Gray
 Write-Host ""
+
+function Pause-IfNeeded([int]$sec = 4) {
+    if (-not $NoPause) { Start-Sleep -Seconds $sec }
+}
 
 function Parse-SemVer([string]$verText) {
     if ([string]::IsNullOrWhiteSpace($verText)) { return [version]"0.0.0.0" }
@@ -25,35 +33,47 @@ function Parse-SemVer([string]$verText) {
     return [version]"0.0.0.0"
 }
 
-$localVer = [version]"1.0.0.0"
-$verFile = Join-Path $repoDir "version.txt"
-if (Test-Path $verFile) {
-    $localVer = Parse-SemVer (Get-Content $verFile -Raw -Encoding UTF8)
-}
-
-$localCsSha = ""
-$localTimeUtc = [datetime]::MinValue
-$csPath = Join-Path $repoDir "dsh-gallery-explorer.cs"
-if (Test-Path $csPath) {
-    $localTimeUtc = (Get-Item $csPath).LastWriteTimeUtc
-    $bytes = [System.IO.File]::ReadAllBytes($csPath)
+function Get-GitBlobSha([string]$filePath) {
+    if (-not (Test-Path $filePath)) { return "" }
+    $bytes = [System.IO.File]::ReadAllBytes($filePath)
     $header = [System.Text.Encoding]::ASCII.GetBytes("blob $($bytes.Length)`0")
     $combined = New-Object byte[] ($header.Length + $bytes.Length)
     [System.Array]::Copy($header, 0, $combined, 0, $header.Length)
     [System.Array]::Copy($bytes, 0, $combined, $header.Length, $bytes.Length)
     $sha1 = [System.Security.Cryptography.SHA1]::Create()
     $hashBytes = $sha1.ComputeHash($combined)
-    $localCsSha = ($hashBytes | ForEach-Object { $_.ToString("x2") }) -join ""
+    return ($hashBytes | ForEach-Object { $_.ToString("x2") }) -join ""
+}
+
+$localVer = [version]"1.0.0.0"
+$verFile = Join-Path $repoDir "version.txt"
+if (Test-Path $verFile) {
+    $localVer = Parse-SemVer (Get-Content $verFile -Raw -Encoding UTF8)
+}
+
+$csPath = Join-Path $repoDir "dsh-gallery-explorer.cs"
+$localCsSha = Get-GitBlobSha $csPath
+$localTimeUtc = if (Test-Path $csPath) { (Get-Item $csPath).LastWriteTimeUtc } else { [datetime]::MinValue }
+
+$localHeadSha = ""
+$localHeadTimeUtc = [datetime]::MinValue
+$isDirty = $false
+if (Test-Path "$repoDir\.git") {
+    try {
+        $localHeadSha = (git -C $repoDir rev-parse HEAD 2>$null).Trim()
+        $ct = (git -C $repoDir show -s --format=%cI HEAD 2>$null).Trim()
+        if ($ct) { $localHeadTimeUtc = [datetime]::Parse($ct).ToUniversalTime() }
+        $dirtyLines = git -C $repoDir status --porcelain -- "dsh-gallery-explorer.cs" "dsh_file_tags.py" "artist_purity_engine.py" 2>$null
+        if ($dirtyLines) { $isDirty = $true }
+    } catch {}
 }
 
 $commitFile = Join-Path $repoDir ".last_synced_commit"
-$lastCommitSha = ""
-$lastCommitTimeUtc = [datetime]::MinValue
-if (Test-Path $commitFile) {
+if (-not $localHeadSha -and (Test-Path $commitFile)) {
     $lines = Get-Content $commitFile -Encoding UTF8
-    if ($lines.Count -ge 1) { $lastCommitSha = $lines[0].Trim() }
+    if ($lines.Count -ge 1) { $localHeadSha = $lines[0].Trim() }
     if ($lines.Count -ge 2) {
-        try { $lastCommitTimeUtc = [datetime]::Parse($lines[1].Trim()).ToUniversalTime() } catch {}
+        try { $localHeadTimeUtc = [datetime]::Parse($lines[1].Trim()).ToUniversalTime() } catch {}
     }
 }
 
@@ -67,12 +87,6 @@ try {
     $tcp.Close()
 } catch {}
 
-$headers = @{
-    Accept = "application/vnd.github+json"
-    "User-Agent" = "DshGalleryExplorer-VersionChecker"
-}
-
-# 自动读取本机 GitHub Token（避免共享代理 IP 触发匿名 API 60次/小时 403 限流）
 $token = $env:GITHUB_TOKEN
 $tokenFile = Join-Path $repoDir ".github_token"
 if (-not $token -and (Test-Path $tokenFile)) {
@@ -80,15 +94,16 @@ if (-not $token -and (Test-Path $tokenFile)) {
 }
 if (-not $token) {
     $gcmCandidates = @(
-        "C:\Program Files\Git\mingw64\bin\git-credential-manager.exe",
+        "C:\Users\Administrator\AppData\Local\hermes\tools\git-2.53.0+3-win32-x64\mingw64\bin\git-credential-manager.exe",
         "C:\Users\Admin\AppData\Local\hermes\tools\git-2.53.0+3-win32-x64\mingw64\bin\git-credential-manager.exe",
-        "C:\Users\Administrator\AppData\Local\hermes\tools\git-2.53.0+3-win32-x64\mingw64\bin\git-credential-manager.exe"
+        "C:\Program Files\Git\mingw64\bin\git-credential-manager.exe"
     )
     foreach ($gcm in $gcmCandidates) {
         if (Test-Path $gcm) {
             try {
                 $env:GCM_INTERACTIVE = "never"
-                $credLines = "protocol=https`nhost=github.com`nusername=$login`n`n" | & $gcm get 2>&1
+                $credInput = "protocol=https`nhost=github.com`nusername=$login`n`n"
+                $credLines = $credInput | & $gcm get 2>&1
                 foreach ($line in $credLines) {
                     if ($line -match '^password=(.+)$') { $token = $matches[1].Trim(); break }
                 }
@@ -97,90 +112,116 @@ if (-not $token) {
         }
     }
 }
-if ($token) {
-    $headers["Authorization"] = "Bearer $token"
-}
 
-function Invoke-GitHubApi([string]$Uri) {
-    if ($proxy) {
-        try {
-            return Invoke-RestMethod -Method Get -Uri $Uri -Headers $headers -Proxy $proxy
-        } catch {
-            return Invoke-RestMethod -Method Get -Uri $Uri -Headers $headers
-        }
-    }
-    return Invoke-RestMethod -Method Get -Uri $Uri -Headers $headers
+$headers = @{
+    Accept = "application/vnd.github+json"
+    "User-Agent" = "DshGalleryExplorer-VersionChecker"
 }
+if ($token) { $headers["Authorization"] = "Bearer $token" }
+$invokeParams = @{ Headers = $headers }
+if ($proxy) { $invokeParams["Proxy"] = $proxy }
 
 Write-Host "[1/2] 正在检测本地版本与 GitHub ($login/$repoName) 远端版本 ..." -ForegroundColor Yellow
-Write-Host ("      本地当前版本 : v{0}" -f $localVer.ToString(3)) -ForegroundColor White
 
 $remoteVer = [version]"1.0.0.0"
 try {
-    $latestRel = Invoke-GitHubApi "https://api.github.com/repos/$login/$repoName/releases/latest"
+    $latestRel = Invoke-RestMethod -Method Get -Uri "https://api.github.com/repos/$login/$repoName/releases/latest" @invokeParams
     if ($latestRel -and $latestRel.tag_name) {
         $remoteVer = Parse-SemVer $latestRel.tag_name
     }
 } catch {}
 
-$commits = Invoke-GitHubApi "https://api.github.com/repos/$login/$repoName/commits?per_page=1"
+$commits = Invoke-RestMethod -Method Get -Uri "https://api.github.com/repos/$login/$repoName/commits?per_page=1" @invokeParams
 $headCommit = $commits[0]
 $remoteCommitSha = $headCommit.sha
 $remoteCommitShort = $remoteCommitSha.Substring(0, 7)
 $remoteCommitTimeUtc = [datetime]::Parse($headCommit.commit.committer.date).ToUniversalTime()
 $remoteCommitMsg = ($headCommit.commit.message -split "`n")[0].Trim()
 
-$tree = Invoke-GitHubApi "https://api.github.com/repos/$login/$repoName/git/trees/$remoteCommitSha`?recursive=1"
+$tree = Invoke-RestMethod -Method Get -Uri "https://api.github.com/repos/$login/$repoName/git/trees/$remoteCommitSha`?recursive=1" @invokeParams
 $remoteCsBlobSha = ""
 foreach ($item in $tree.tree) {
     if ($item.path -eq "dsh-gallery-explorer.cs") {
         $remoteCsBlobSha = $item.sha
     }
     if ($item.path -eq "version.txt") {
-        $blob = Invoke-GitHubApi $item.url
+        $blob = Invoke-RestMethod -Method Get -Uri $item.url @invokeParams
         $text = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($blob.content))
         $v = Parse-SemVer $text
         if ($v -gt $remoteVer) { $remoteVer = $v }
     }
 }
 
-Write-Host ("      远端最新版本 : v{0} (Commit: {1} @ {2} UTC)" -f $remoteVer.ToString(3), $remoteCommitShort, $remoteCommitTimeUtc.ToString("yyyy-MM-dd HH:mm:ss")) -ForegroundColor Cyan
+$localShort = if ($localHeadSha.Length -ge 7) { $localHeadSha.Substring(0, 7) } else { "unknown" }
+Write-Host ("      本地当前版本 : v{0} (Commit: {1}, 源码SHA: {2})" -f $localVer.ToString(3), $localShort, $(if ($localCsSha) { $localCsSha.Substring(0, 7) } else { "none" })) -ForegroundColor White
+Write-Host ("      远端最新版本 : v{0} (Commit: {1} @ {2} UTC, 源码SHA: {3})" -f $remoteVer.ToString(3), $remoteCommitShort, $remoteCommitTimeUtc.ToString("yyyy-MM-dd HH:mm:ss"), $(if ($remoteCsBlobSha) { $remoteCsBlobSha.Substring(0, 7) } else { "none" })) -ForegroundColor Cyan
 Write-Host ("      远端提交说明 : {0}" -f $remoteCommitMsg) -ForegroundColor Gray
 Write-Host ""
 
-if ($remoteVer -lt $localVer) {
-    Write-Host "⛔ [防降级拦截] 云端版本 (v$($remoteVer.ToString(3))) 低于本地版本 (v$($localVer.ToString(3)))，禁止覆盖！" -ForegroundColor Red
-    Start-Sleep -Seconds 3
-    exit 0
-}
-
-if ($remoteVer -eq $localVer) {
+if (-not $Force) {
+    if ($isDirty) {
+        Write-Host "⛔ [防呆拦截：本地有未推送的新改动] 检测到本地核心源码相比上次提交有未保存/未推送的修改！" -ForegroundColor Red
+        Write-Host "   为防止云端旧文件覆盖冲掉你刚修改的代码，已自动中止拉取。请先执行「推送到 GitHub」或传入 -Force。" -ForegroundColor Yellow
+        Pause-IfNeeded 4
+        exit 0
+    }
+    if ($remoteVer -lt $localVer) {
+        Write-Host "⛔ [防降级拦截] 云端版本号 (v$($remoteVer.ToString(3))) 低于本地版本号 (v$($localVer.ToString(3)))，禁止覆盖！" -ForegroundColor Red
+        Pause-IfNeeded 3
+        exit 0
+    }
     if ($localCsSha -and $remoteCsBlobSha -and ($localCsSha -eq $remoteCsBlobSha)) {
-        Write-Host "⛔ [防重复/防降级拦截] 云端版本 (v$($remoteVer.ToString(3)), $remoteCommitShort) 没有比本地更高（完全一致），不执行覆盖。" -ForegroundColor Yellow
-        Start-Sleep -Seconds 3
+        # 即使仓库源码已是最新，也自动校验本机部署目录 (.dsh\tools 和 AppData\Local\Programs) 是否一致，不一致则顺手补齐部署！
+        $repoExe = Join-Path $repoDir "dsh-gallery-explorer.exe"
+        $toolsExe = Join-Path $env:USERPROFILE ".dsh\tools\dsh-gallery-explorer.exe"
+        $instExe = "$env:LOCALAPPDATA\Programs\DshGalleryExplorer\dsh-gallery-explorer.exe"
+        if (Test-Path $repoExe) {
+            $repoExeSha = Get-GitBlobSha $repoExe
+            if ((Get-GitBlobSha $toolsExe) -ne $repoExeSha -or (Get-GitBlobSha $instExe) -ne $repoExeSha) {
+                Write-Host "🔄 本地仓库已是最新，检测到运行目录副本未对齐，正在自动补齐部署 ..." -ForegroundColor Yellow
+                Get-Process -Name "dsh-gallery-explorer" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+                Start-Sleep -Milliseconds 150
+                New-Item -Path (Split-Path -Parent $instExe) -ItemType Directory -Force | Out-Null
+                Copy-Item -LiteralPath $repoExe -Destination $instExe -Force -ErrorAction SilentlyContinue
+                if (Test-Path (Split-Path -Parent $toolsExe)) {
+                    Copy-Item -LiteralPath $csPath -Destination (Join-Path (Split-Path -Parent $toolsExe) "dsh-gallery-explorer.cs") -Force -ErrorAction SilentlyContinue
+                    Copy-Item -LiteralPath $repoExe -Destination $toolsExe -Force -ErrorAction SilentlyContinue
+                }
+                Write-Host "✅ 本机运行目录已对齐到最新 v$($localVer.ToString(3)) ($remoteCommitShort)。" -ForegroundColor Green
+                Pause-IfNeeded 2
+                exit 0
+            }
+        }
+        Write-Host "✅ [已是最新 · 防重复拦截] 本地与云端完全一致 (v$($remoteVer.ToString(3)), Commit $remoteCommitShort)，无需重复拉取。" -ForegroundColor Green
+        Pause-IfNeeded 2
         exit 0
     }
-    if ($lastCommitSha -eq $remoteCommitSha -and $localTimeUtc -gt $remoteCommitTimeUtc) {
-        Write-Host "⛔ [防降级拦截] 本地包含基于 $remoteCommitShort 的更新修改，云端版本未高于本地，禁止覆盖！" -ForegroundColor Red
-        Start-Sleep -Seconds 4
-        exit 0
+    if ($TestAncestry = (Test-Path "$repoDir\.git")) {
+        try {
+            git -C $repoDir fetch origin main --quiet 2>$null
+            git -C $repoDir merge-base --is-ancestor $remoteCommitSha HEAD 2>$null
+            if ($LASTEXITCODE -eq 0 -and $localHeadSha -ne $remoteCommitSha) {
+                Write-Host "⛔ [防回退拦截] 本地仓库 ($localShort) 领先于云端 ($remoteCommitShort)，禁止用云端旧提交覆盖本地！" -ForegroundColor Red
+                Pause-IfNeeded 4
+                exit 0
+            }
+        } catch {}
     }
-    if ($lastCommitTimeUtc -ge $remoteCommitTimeUtc) {
-        Write-Host "⛔ [防降级拦截] 云端版本时间未高于本地已同步版本，禁止覆盖！" -ForegroundColor Red
-        Start-Sleep -Seconds 3
+    if ($localHeadSha -eq $remoteCommitSha -and $localTimeUtc -gt $remoteCommitTimeUtc) {
+        Write-Host "⛔ [防降级拦截] 本地包含基于 $remoteCommitShort 的更新修改，云端未高于本地，禁止覆盖！" -ForegroundColor Red
+        Pause-IfNeeded 4
         exit 0
     }
 }
 
-Write-Host "[2/2] 检测到云端有更高版本 ($remoteCommitShort)，正在下载覆盖到本地 ..." -ForegroundColor Yellow
+Write-Host "[2/2] 检测到云端有新版本 ($remoteCommitShort)，正在拉取并编译部署到本地 ..." -ForegroundColor Yellow
 Get-Process -Name "dsh-gallery-explorer" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 Start-Sleep -Milliseconds 200
 
 foreach ($item in $tree.tree) {
     if ($item.type -eq "blob") {
-        # Keep local DownloadGalleryFromGitHub.ps1 & SyncGalleryToGitHub.ps1 intact so local auth/post-download hooks are never overwritten
-        if ($item.path -in @("DownloadGalleryFromGitHub.ps1", "SyncGalleryToGitHub.ps1")) { continue }
-        $blob = Invoke-GitHubApi $item.url
+        if ($item.path -eq "DownloadGalleryFromGitHub.ps1" -or $item.path -eq "SyncGalleryToGitHub.ps1") { continue }
+        $blob = Invoke-RestMethod -Method Get -Uri $item.url @invokeParams
         $bytes = [System.Convert]::FromBase64String($blob.content)
         $outPath = Join-Path $repoDir $item.path
         $outDir = Split-Path -Parent $outPath
@@ -199,11 +240,10 @@ foreach ($item in $tree.tree) {
         } else {
             [System.IO.File]::WriteAllBytes($outPath, $bytes)
         }
-        Write-Host "      -> 已更新文件: $($item.path) ($($bytes.Length) bytes)" -ForegroundColor Green
+        Write-Host "      -> 已拉取文件: $($item.path) ($($bytes.Length) bytes)" -ForegroundColor Green
     }
 }
 
-# 自动清理 Windows 兼容性提权标记 (RUNASADMIN) 与网络下载锁定流 (Zone.Identifier)，防止打开时弹出 UAC / 危害确认窗口
 $exeFullPath = Join-Path $repoDir "dsh-gallery-explorer.exe"
 $compatReg = "HKCU:\Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers"
 if (Test-Path $compatReg) {
@@ -213,20 +253,8 @@ Get-ChildItem -LiteralPath $repoDir -File -ErrorAction SilentlyContinue | ForEac
     Unblock-File -LiteralPath $_.FullName -ErrorAction SilentlyContinue
 }
 
-# 将源码中的硬编码 C:\Users\Administrator\.dsh 兼容替换为动态当前用户目录并本机重新编译，确保多机同步通用
 $csFullPath = Join-Path $repoDir "dsh-gallery-explorer.cs"
 if (Test-Path $csFullPath) {
-    $csText = Get-Content -LiteralPath $csFullPath -Raw -Encoding UTF8
-    # 将源码中的硬编码路径与视频缩略图提取逻辑自动优化（避免触发 Windows Store HEVC 扩展安装弹窗）
-    if ($csText -match 'C:\\Users\\Administrator\\\.dsh') {
-        $csText = $csText.Replace('@"C:\Users\Administrator\.dsh\gallery_cache\thumbnails"', 'Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), @".dsh\gallery_cache\thumbnails")')
-        $csText = $csText.Replace('@"C:\Users\Administrator\.dsh\gallery_cache\video_reels"', 'Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), @".dsh\gallery_cache\video_reels")')
-        $csText = $csText.Replace('const string LEDGER_PATH = @"C:\Users\Administrator\.dsh\gallery_cache\_dsh_tags_ledger.json";', 'static readonly string LEDGER_PATH = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), @".dsh\gallery_cache\_dsh_tags_ledger.json");')
-        $csText = $csText.Replace('const string SHORTCUTS_PATH = @"C:\Users\Administrator\.dsh\gallery_cache\_dsh_sidebar_shortcuts.json";', 'static readonly string SHORTCUTS_PATH = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), @".dsh\gallery_cache\_dsh_sidebar_shortcuts.json");')
-        $csText = $csText.Replace('const string TAG_INDEX_DIR = @"C:\Users\Administrator\.dsh\gallery_cache\tags_index";', 'static readonly string TAG_INDEX_DIR = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), @".dsh\gallery_cache\tags_index");')
-        $csText = $csText.Replace(': (Directory.Exists(@"F:\Openclow\画师素材库") ? @"F:\Openclow\画师素材库" : @"F:\");', ': (Directory.Exists(@"F:\Openclow\画师素材库") ? @"F:\Openclow\画师素材库" : (Directory.Exists(@"F:\") ? @"F:\" : (Directory.Exists(@"D:\") ? @"D:\" : Environment.GetFolderPath(Environment.SpecialFolder.Desktop))));')
-        Set-Content -LiteralPath $csFullPath -Value $csText -Encoding UTF8
-    }
     $csc = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
     $wpfDir = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\WPF"
     $netDir = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319"
@@ -243,20 +271,30 @@ if (Test-Path $csFullPath) {
         /r:System.dll /r:System.Core.dll /r:System.Drawing.dll /r:System.Windows.Forms.dll `
         /r:"$wpfDir\PresentationCore.dll" /r:"$wpfDir\PresentationFramework.dll" /r:"$wpfDir\WindowsBase.dll" /r:"$netDir\System.Xaml.dll" `
         $csFullPath
+    if ($LASTEXITCODE -ne 0) { throw "dsh-gallery-explorer.exe 编译失败！" }
 
-    # 同步覆盖到系统标准程序目录 AppData\Local\Programs\DshGalleryExplorer，避免 SmartScreen 拦截
     $instDir = "$env:LOCALAPPDATA\Programs\DshGalleryExplorer"
     if (-not (Test-Path $instDir)) { New-Item -Path $instDir -ItemType Directory -Force | Out-Null }
+    Copy-Item -LiteralPath $exeFullPath -Destination "$instDir\dsh-gallery-explorer.exe" -Force -ErrorAction SilentlyContinue
+    $liveToolsDir = Join-Path $env:USERPROFILE ".dsh\tools"
+    if (Test-Path $liveToolsDir) {
+        Copy-Item -LiteralPath $csFullPath -Destination "$liveToolsDir\dsh-gallery-explorer.cs" -Force -ErrorAction SilentlyContinue
+        Copy-Item -LiteralPath $exeFullPath -Destination "$liveToolsDir\dsh-gallery-explorer.exe" -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Set-Content -Path (Join-Path $repoDir "version.txt") -Value $remoteVer.ToString(3) -Encoding UTF8 -NoNewline
+Set-Content -Path (Join-Path $repoDir ".last_synced_commit") -Value @($remoteCommitSha, $remoteCommitTimeUtc.ToString("o")) -Encoding UTF8
+
+if (Test-Path "$repoDir\.git") {
     try {
-        Copy-Item -LiteralPath $exeFullPath -Destination "$instDir\dsh-gallery-explorer.exe" -Force
+        git -C $repoDir fetch origin main --quiet 2>$null
+        git -C $repoDir reset --mixed origin/main 2>$null
     } catch {}
 }
 
-Set-Content -Path (Join-Path $repoDir "version.txt") -Value $remoteVer.ToString(3) -Encoding UTF8
-Set-Content -Path (Join-Path $repoDir ".last_synced_commit") -Value @($remoteCommitSha, $remoteCommitTimeUtc.ToString("o")) -Encoding UTF8
-
 Write-Host ""
 Write-Host "=========================================================" -ForegroundColor Green
-Write-Host " ✅ 下载并覆盖完成！当前已是最新 v$($remoteVer.ToString(3)) ($remoteCommitShort)" -ForegroundColor Green
+Write-Host " ✅ DshGalleryExplorer 拉取并部署完成！当前版本: v$($remoteVer.ToString(3)) ($remoteCommitShort)" -ForegroundColor Green
 Write-Host "=========================================================" -ForegroundColor Green
-Start-Sleep -Seconds 3
+Pause-IfNeeded 3
