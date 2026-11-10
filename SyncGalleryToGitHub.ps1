@@ -59,7 +59,10 @@ $proxy = $null
 try {
     $tcp = New-Object System.Net.Sockets.TcpClient
     $ar = $tcp.BeginConnect("127.0.0.1", 7897, $null, $null)
-    if ($ar.AsyncWaitHandle.WaitOne(300, $false) -and $tcp.Connected) { $proxy = "http://127.0.0.1:7897" }
+    if ($ar.AsyncWaitHandle.WaitOne(300, $false) -and $tcp.Connected) {
+        $null = Invoke-RestMethod -Method Head -Uri "https://api.github.com" -Proxy "http://127.0.0.1:7897" -Headers @{ "User-Agent" = "Probe" } -TimeoutSec 3 -ErrorAction Stop
+        $proxy = "http://127.0.0.1:7897"
+    }
     $tcp.Close()
 } catch {}
 
@@ -206,13 +209,15 @@ if ($token) {
     git remote set-url origin $cleanRemoteUrl
 }
 
+$gitProxyArg = if ($proxy) { "http.proxy=$proxy" } else { "http.proxy=" }
+$gitHttpsProxyArg = if ($proxy) { "https.proxy=$proxy" } else { "https.proxy=" }
 try {
     if ($token) {
-        git -c credential.helper= -c http.sslBackend=openssl push -u origin main --force
-        git -c credential.helper= -c http.sslBackend=openssl push origin $tagName --force
+        git -c $gitProxyArg -c $gitHttpsProxyArg -c credential.helper= -c http.sslBackend=openssl push -u origin main --force
+        git -c $gitProxyArg -c $gitHttpsProxyArg -c credential.helper= -c http.sslBackend=openssl push origin $tagName --force
     } else {
-        git push -u origin main --force
-        git push origin $tagName --force
+        git -c $gitProxyArg -c $gitHttpsProxyArg push -u origin main --force
+        git -c $gitProxyArg -c $gitHttpsProxyArg push origin $tagName --force
     }
 } finally {
     git remote set-url origin $cleanRemoteUrl
