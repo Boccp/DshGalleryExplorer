@@ -196,14 +196,16 @@ if (-not $Force) {
         Pause-IfNeeded 2
         exit 0
     }
-    if ($TestAncestry = (Test-Path "$repoDir\.git")) {
+    if (Test-Path "$repoDir\.git") {
         try {
-            git -C $repoDir fetch origin main --quiet 2>$null
-            git -C $repoDir merge-base --is-ancestor $remoteCommitSha HEAD 2>$null
+            git -C $repoDir cat-file -e "$remoteCommitSha^{commit}" 2>$null
             if ($LASTEXITCODE -eq 0 -and $localHeadSha -ne $remoteCommitSha) {
-                Write-Host "⛔ [防回退拦截] 本地仓库 ($localShort) 领先于云端 ($remoteCommitShort)，禁止用云端旧提交覆盖本地！" -ForegroundColor Red
-                Pause-IfNeeded 4
-                exit 0
+                git -C $repoDir merge-base --is-ancestor $remoteCommitSha HEAD 2>$null
+                if ($LASTEXITCODE -eq 0) {
+                    Write-Host "⛔ [防回退拦截] 本地仓库 ($localShort) 领先于云端 ($remoteCommitShort)，禁止用云端旧提交覆盖本地！" -ForegroundColor Red
+                    Pause-IfNeeded 4
+                    exit 0
+                }
             }
         } catch {}
     }
@@ -288,8 +290,10 @@ Set-Content -Path (Join-Path $repoDir ".last_synced_commit") -Value @($remoteCom
 
 if (Test-Path "$repoDir\.git") {
     try {
-        git -C $repoDir fetch origin main --quiet 2>$null
-        git -C $repoDir reset --mixed origin/main 2>$null
+        if ($token) {
+            git -C $repoDir -c credential.helper= -c http.sslBackend=openssl fetch "https://${login}:${token}@github.com/${login}/${repoName}.git" main --quiet 2>$null
+            git -C $repoDir reset --mixed FETCH_HEAD 2>$null
+        }
     } catch {}
 }
 

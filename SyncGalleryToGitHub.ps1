@@ -136,14 +136,20 @@ if (-not $Force -and $remoteCommitSha) {
             exit 0
         }
     }
-    # 检查云端是否有本地尚未拉取的新 Commit
+    # 检查云端是否有本地尚未拉取的新 Commit（零阻塞：直接用本地 Git 对象库检查云端 SHA 是否已知，未知即代表云端有新提交）
     try {
-        git fetch origin main --quiet 2>$null
         $localHead = (git rev-parse HEAD 2>$null).Trim()
         if ($localHead -and $localHead -ne $remoteCommitSha) {
-            git merge-base --is-ancestor $remoteCommitSha HEAD 2>$null
+            git cat-file -e "$remoteCommitSha^{commit}" 2>$null
             if ($LASTEXITCODE -ne 0) {
                 Write-Host "⛔ [防倒灌拦截] GitHub 云端存在本地尚未拉取的新提交 ($($remoteCommitSha.Substring(0,7)))！" -ForegroundColor Red
+                Write-Host "   为防止强推抹掉云端新记录，请先运行「从 GitHub 拉取更新到本地」或使用 -Force。" -ForegroundColor Yellow
+                Pause-IfNeeded 4
+                exit 0
+            }
+            git merge-base --is-ancestor $remoteCommitSha HEAD 2>$null
+            if ($LASTEXITCODE -ne 0) {
+                Write-Host "⛔ [防倒灌拦截] GitHub 云端存在本地尚未合并的新提交 ($($remoteCommitSha.Substring(0,7)))！" -ForegroundColor Red
                 Write-Host "   为防止强推抹掉云端新记录，请先运行「从 GitHub 拉取更新到本地」或使用 -Force。" -ForegroundColor Yellow
                 Pause-IfNeeded 4
                 exit 0
