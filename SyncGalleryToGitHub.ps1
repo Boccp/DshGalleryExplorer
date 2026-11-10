@@ -1,4 +1,4 @@
-﻿$ErrorActionPreference = 'Stop'
+$ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $Host.UI.RawUI.WindowTitle = "DshGalleryExplorer - 一键编译并上传更新到 GitHub"
@@ -98,16 +98,84 @@ if ($token) {
     git remote set-url origin $cleanRemoteUrl
 }
 
+$proxy = $null
 try {
-    if ($token) {
-        git -c credential.helper= -c http.sslBackend=openssl push -u origin main --force
-        git -c credential.helper= -c http.sslBackend=openssl push origin $tagName --force
-    } else {
-        git push -u origin main --force
-        git push origin $tagName --force
+    $tcp = New-Object System.Net.Sockets.TcpClient
+    $ar = $tcp.BeginConnect("127.0.0.1", 7897, $null, $null)
+    if ($ar.AsyncWaitHandle.WaitOne(300, $false) -and $tcp.Connected) { $proxy = "http://127.0.0.1:7897" }
+    $tcp.Close()
+} catch {}
+
+$gitPushSucceeded = $false
+try {
+    $gitArgs = @("-c", "credential.helper=", "-c", "http.sslBackend=openssl")
+    if ($proxy) {
+        $gitArgs += @("-c", "http.proxy=$proxy", "-c", "https.proxy=$proxy")
     }
-} finally {
+    git @gitArgs push -u origin main --force 2>$null
+    if ($LASTEXITCODE -eq 0) {
+        git @gitArgs push origin $tagName --force 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            $gitPushSucceeded = $true
+            Write-Host "      -> Git 直接推送完成。" -ForegroundColor Green
+        }
+    }
+} catch {} finally {
     git remote set-url origin $cleanRemoteUrl
+}
+
+# 如果 github.com:443 直连被重置，自动通过畅通的 api.github.com (GitHub Git Data API) 同步提交树与 main/tag 引用
+if (-not $gitPushSucceeded -and $token) {
+    Write-Host "      -> 检测到 github.com:443 直连受阻，正在通过 api.github.com 同步仓库代码树 ..." -ForegroundColor Cyan
+    $apiHeaders = @{
+        Authorization = "Bearer $token"
+        Accept = "application/vnd.github+json"
+        "X-GitHub-Api-Version" = "2022-11-28"
+        "User-Agent" = "DshGalleryExplorer-Publisher"
+    }
+    $apiParams = @{ Headers = $apiHeaders }
+    if ($proxy) { $apiParams["Proxy"] = $proxy }
+
+    $refInfo = Invoke-RestMethod -Method Get -Uri "https://api.github.com/repos/$login/$repoName/git/ref/heads/main" @apiParams
+    $parentCommitSha = $refInfo.object.sha
+    $parentCommit = Invoke-RestMethod -Method Get -Uri "https://api.github.com/repos/$login/$repoName/git/commits/$parentCommitSha" @apiParams
+    $baseTreeSha = $parentCommit.tree.sha
+
+    $trackedFiles = git ls-files
+    $treeEntries = New-Object System.Collections.ArrayList
+    foreach ($relPath in $trackedFiles) {
+        $fullFile = Join-Path $repoDir $relPath
+        if (-not (Test-Path $fullFile)) { continue }
+        $bytes = [System.IO.File]::ReadAllBytes($fullFile)
+        $b64 = [Convert]::ToBase64String($bytes)
+        $blobBody = (@{ content = $b64; encoding = "base64" } | ConvertTo-Json -Compress)
+        $blobResp = Invoke-RestMethod -Method Post -Uri "https://api.github.com/repos/$login/$repoName/git/blobs" -ContentType "application/json; charset=utf-8" -Body $blobBody @apiParams
+        [void]$treeEntries.Add(@{
+            path = ($relPath -replace '\\', '/')
+            mode = "100644"
+            type = "blob"
+            sha  = $blobResp.sha
+        })
+    }
+
+    $treeBody = (@{ base_tree = $baseTreeSha; tree = $treeEntries } | ConvertTo-Json -Depth 5 -Compress)
+    $newTree = Invoke-RestMethod -Method Post -Uri "https://api.github.com/repos/$login/$repoName/git/trees" -ContentType "application/json; charset=utf-8" -Body $treeBody @apiParams
+
+    $commitMsg = "Release & sync DshGalleryExplorer ($timestamp)"
+    $commitBody = (@{
+        message = $commitMsg
+        tree    = $newTree.sha
+        parents = @($parentCommitSha)
+    } | ConvertTo-Json -Depth 4 -Compress)
+    $newCommit = Invoke-RestMethod -Method Post -Uri "https://api.github.com/repos/$login/$repoName/git/commits" -ContentType "application/json; charset=utf-8" -Body $commitBody @apiParams
+
+    $updateRefBody = (@{ sha = $newCommit.sha; force = $true } | ConvertTo-Json -Compress)
+    Invoke-RestMethod -Method Patch -Uri "https://api.github.com/repos/$login/$repoName/git/refs/heads/main" -ContentType "application/json; charset=utf-8" -Body $updateRefBody @apiParams | Out-Null
+    try {
+        Invoke-RestMethod -Method Patch -Uri "https://api.github.com/repos/$login/$repoName/git/refs/tags/$tagName" -ContentType "application/json; charset=utf-8" -Body $updateRefBody @apiParams | Out-Null
+    } catch {}
+    Set-Content -Path (Join-Path $repoDir ".last_synced_commit") -Value $newCommit.sha -NoNewline -Encoding UTF8
+    Write-Host "      -> GitHub 远端 main 分支及 $tagName 标签已同步至 Commit: $($newCommit.sha.Substring(0, 7))" -ForegroundColor Green
 }
 
 # 同步覆盖到系统标准程序目录 AppData\Local\Programs\DshGalleryExplorer 以及 .dsh\tools

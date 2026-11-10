@@ -767,6 +767,14 @@ namespace DshGalleryExplorer
             Invalidate();
         }
 
+        public Bitmap TryGetCachedThumbnail(string fullPath)
+        {
+            if (string.IsNullOrEmpty(fullPath)) return null;
+            Bitmap bmp;
+            if (_thumbCache.TryGetValue(fullPath, out bmp)) return bmp;
+            return null;
+        }
+
         public void ClearThumbnailCache()
         {
             foreach (var kv in _thumbCache)
@@ -1722,13 +1730,65 @@ namespace DshGalleryExplorer
 
     internal sealed class FastImageViewerForm : Form
     {
+        private enum CropSelectionMode
+        {
+            None,
+            DraggingNew,
+            TwoClickBlueprint,
+            ResizingOrMoving
+        }
+
+        [Flags]
+        private enum CropHitZone
+        {
+            None = 0,
+            Left = 1,
+            Top = 2,
+            Right = 4,
+            Bottom = 8,
+            Inside = 16
+        }
+
         private List<string> _imageList;
         private int _currentIndex;
         private Bitmap _currentBitmap;
 
+        // Interactive Tilde (~) Screenshot Mode State (ported from ScreenboxLite)
+        private bool _isScreenshotModeActive = false;
+        private CropSelectionMode _cropMode = CropSelectionMode.None;
+        private CropHitZone _activeResizeZone = CropHitZone.None;
+        private bool _hasActiveSelection = false;
+        private RectangleF _currentSelectionRect = RectangleF.Empty;
+        private PointF _selectionStartPoint;
+        private PointF _mouseDownOverlayPoint;
+        private PointF _resizeStartMousePoint;
+        private RectangleF _resizeStartSelectionRect;
+        private Point _currentMousePt = Point.Empty;
+
+        // Shared persistent settings with ScreenboxLite (%AppData%\ScreenboxLite\settings.ini)
+        private readonly string _settingsFilePath;
+        private string _saveFolderPath;
+        private RectangleF? _lastNormalizedCropRect = null;
+
+        // Top Bar Controls (only shown in Screenshot Mode, floating or docked without shifting image geometry)
+        private Panel _topSaveBarPanel;
+        private Label _saveLocationLabel;
+
+        // Toast & Saved Screenshot Preview Card State
+        private string _toastText = "";
+        private DateTime _toastUntil = DateTime.MinValue;
+        private Bitmap _savedPreviewThumb = null;
+        private string _savedPreviewFileName = "";
+        private string _savedPreviewFullPath = "";
+        private DateTime _savedPreviewUntil = DateTime.MinValue;
+        private Rectangle _savedPreviewCardBounds = Rectangle.Empty;
+        private System.Windows.Forms.Timer _uiOverlayTimer;
+        private long _lastTildeTriggerTick = 0;
+        private long _lastKeyRTriggerTick = 0;
+
         public FastImageViewerForm(string currentImagePath, List<string> orderedImagePaths = null)
         {
-            Text = Path.GetFileName(currentImagePath) + " — 按 Left/Right 翻页，Esc 或双击退出";
+            Text = Path.GetFileName(currentImagePath) + " — 按 ~ 键截图，Left/Right 翻页，Esc 或双击退出";
             Rectangle wa = Screen.PrimaryScreen.WorkingArea;
             Size = new Size((int)(wa.Width * 0.88), (int)(wa.Height * 0.90));
             StartPosition = FormStartPosition.CenterScreen;
@@ -1736,6 +1796,48 @@ namespace DshGalleryExplorer
             ForeColor = Color.White;
             DoubleBuffered = true;
             KeyPreview = true;
+
+            string appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+            _settingsFilePath = Path.Combine(appData, "ScreenboxLite", "settings.ini");
+            string defaultPicDir = Environment.GetFolderPath(Environment.SpecialFolder.MyPictures);
+            _saveFolderPath = Path.Combine(defaultPicDir, "Screenshots");
+            LoadScreenshotSettings();
+            try
+            {
+                if (!Directory.Exists(_saveFolderPath))
+                    Directory.CreateDirectory(_saveFolderPath);
+            }
+            catch { }
+
+            BuildScreenshotSaveBar();
+
+            _uiOverlayTimer = new System.Windows.Forms.Timer { Interval = 50 };
+            _uiOverlayTimer.Tick += (s, e) =>
+            {
+                DateTime now = DateTime.UtcNow;
+                bool needRedraw = false;
+                if (!string.IsNullOrEmpty(_toastText) && now >= _toastUntil)
+                {
+                    _toastText = "";
+                    needRedraw = true;
+                }
+                if (_savedPreviewThumb != null && now >= _savedPreviewUntil)
+                {
+                    Bitmap oldThumb = _savedPreviewThumb;
+                    _savedPreviewThumb = null;
+                    _savedPreviewCardBounds = Rectangle.Empty;
+                    if (oldThumb != null) oldThumb.Dispose();
+                    needRedraw = true;
+                }
+                if (needRedraw)
+                {
+                    Invalidate();
+                }
+                if (string.IsNullOrEmpty(_toastText) && _savedPreviewThumb == null)
+                {
+                    _uiOverlayTimer.Stop();
+                }
+            };
 
             _imageList = new List<string>();
             if (orderedImagePaths != null && orderedImagePaths.Count > 0)
@@ -1763,32 +1865,951 @@ namespace DshGalleryExplorer
             LoadCurrent();
         }
 
+        private void BuildScreenshotSaveBar()
+        {
+            _topSaveBarPanel = new Panel
+            {
+                Dock = DockStyle.Top,
+                Height = 42,
+                BackColor = Color.FromArgb(22, 42, 48),
+                Visible = false
+            };
+
+            Label titleLbl = new Label
+            {
+                Text = "📷 默认截图保存位置：",
+                ForeColor = Color.FromArgb(0, 229, 255),
+                Font = new Font("Microsoft YaHei UI", 9.5f, FontStyle.Bold),
+                AutoSize = true,
+                Location = new Point(14, 11)
+            };
+            _topSaveBarPanel.Controls.Add(titleLbl);
+
+            _saveLocationLabel = new Label
+            {
+                Text = _saveFolderPath,
+                ForeColor = Color.FromArgb(215, 235, 242),
+                BackColor = Color.FromArgb(18, 28, 34),
+                BorderStyle = BorderStyle.FixedSingle,
+                Font = new Font("Microsoft YaHei UI", 9f, FontStyle.Regular),
+                AutoEllipsis = true,
+                TextAlign = ContentAlignment.MiddleLeft,
+                Location = new Point(168, 8),
+                Size = new Size(340, 26)
+            };
+            _topSaveBarPanel.Controls.Add(_saveLocationLabel);
+
+            Label tipLbl = new Label
+            {
+                Text = "[~截图模式] 左键拖拽或双击两点定框  |  按 [R] 恢复上次裁剪框  |  再按 [~] 保存截图  |  右键/Esc 逐级回退",
+                ForeColor = Color.FromArgb(190, 225, 240),
+                Font = new Font("Microsoft YaHei UI", 9f, FontStyle.Regular),
+                AutoSize = true,
+                Location = new Point(520, 12)
+            };
+            _topSaveBarPanel.Controls.Add(tipLbl);
+
+            Button openDirBtn = new Button
+            {
+                Text = "打开目录",
+                Size = new Size(76, 26),
+                FlatStyle = FlatStyle.Flat,
+                BackColor = Color.FromArgb(30, 52, 60),
+                ForeColor = Color.White,
+                Font = new Font("Microsoft YaHei UI", 8.8f),
+                Cursor = Cursors.Hand,
+                Anchor = AnchorStyles.Top | AnchorStyles.Right
+            };
+            openDirBtn.FlatAppearance.BorderColor = Color.FromArgb(0, 180, 210);
+            openDirBtn.Click += (s, e) =>
+            {
+                try
+                {
+                    if (!Directory.Exists(_saveFolderPath)) Directory.CreateDirectory(_saveFolderPath);
+                    Process.Start("explorer.exe", _saveFolderPath);
+                }
+                catch { }
+                Focus();
+            };
+
+            Button changeDirBtn = new Button
+            {
+                Text = "更改目录",
+                Size = new Size(76, 26),
+                FlatStyle = FlatStyle.Flat,
+                BackColor = Color.FromArgb(30, 52, 60),
+                ForeColor = Color.White,
+                Font = new Font("Microsoft YaHei UI", 8.8f),
+                Cursor = Cursors.Hand,
+                Anchor = AnchorStyles.Top | AnchorStyles.Right
+            };
+            changeDirBtn.FlatAppearance.BorderColor = Color.FromArgb(0, 180, 210);
+            changeDirBtn.Click += (s, e) =>
+            {
+                using (FolderBrowserDialog dlg = new FolderBrowserDialog())
+                {
+                    dlg.Description = "选择截图默认保存目录";
+                    dlg.SelectedPath = _saveFolderPath;
+                    if (dlg.ShowDialog(this) == DialogResult.OK && !string.IsNullOrEmpty(dlg.SelectedPath))
+                    {
+                        _saveFolderPath = dlg.SelectedPath;
+                        _saveLocationLabel.Text = _saveFolderPath;
+                        SaveScreenshotSettings();
+                        ShowToast("已更新截图保存目录: " + _saveFolderPath);
+                    }
+                }
+                Focus();
+            };
+
+            _topSaveBarPanel.Resize += (s, e) =>
+            {
+                openDirBtn.Location = new Point(_topSaveBarPanel.ClientSize.Width - 90, 8);
+                changeDirBtn.Location = new Point(_topSaveBarPanel.ClientSize.Width - 172, 8);
+                tipLbl.MaximumSize = new Size(Math.Max(100, changeDirBtn.Left - tipLbl.Left - 12), 24);
+            };
+            openDirBtn.Location = new Point(_topSaveBarPanel.ClientSize.Width - 90, 8);
+            changeDirBtn.Location = new Point(_topSaveBarPanel.ClientSize.Width - 172, 8);
+
+            _topSaveBarPanel.Controls.Add(changeDirBtn);
+            _topSaveBarPanel.Controls.Add(openDirBtn);
+            Controls.Add(_topSaveBarPanel);
+        }
+
+        private void LoadScreenshotSettings()
+        {
+            try
+            {
+                if (!File.Exists(_settingsFilePath)) return;
+                string[] lines = File.ReadAllLines(_settingsFilePath);
+                foreach (string rawLine in lines)
+                {
+                    if (string.IsNullOrWhiteSpace(rawLine)) continue;
+                    int sep = rawLine.IndexOf('=');
+                    if (sep <= 0) continue;
+                    string key = rawLine.Substring(0, sep).Trim();
+                    string val = rawLine.Substring(sep + 1).Trim();
+                    if (string.Equals(key, "SaveFolderPath", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (!string.IsNullOrWhiteSpace(val)) _saveFolderPath = val;
+                    }
+                    else if (string.Equals(key, "LastCrop", StringComparison.OrdinalIgnoreCase))
+                    {
+                        string[] parts = val.Split(',');
+                        float cx, cy, cw, ch;
+                        if (parts.Length == 4 &&
+                            float.TryParse(parts[0], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out cx) &&
+                            float.TryParse(parts[1], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out cy) &&
+                            float.TryParse(parts[2], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out cw) &&
+                            float.TryParse(parts[3], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out ch) &&
+                            cw > 0.001f && ch > 0.001f)
+                        {
+                            _lastNormalizedCropRect = new RectangleF(
+                                ClampF(cx, 0f, 1f),
+                                ClampF(cy, 0f, 1f),
+                                ClampF(cw, 0.001f, 1f),
+                                ClampF(ch, 0.001f, 1f));
+                        }
+                    }
+                }
+            }
+            catch { }
+        }
+
+        private void SaveScreenshotSettings()
+        {
+            try
+            {
+                string dir = Path.GetDirectoryName(_settingsFilePath);
+                if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+                    Directory.CreateDirectory(dir);
+
+                Dictionary<string, string> dict = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                if (File.Exists(_settingsFilePath))
+                {
+                    foreach (string rawLine in File.ReadAllLines(_settingsFilePath))
+                    {
+                        if (string.IsNullOrWhiteSpace(rawLine)) continue;
+                        int sep = rawLine.IndexOf('=');
+                        if (sep <= 0) continue;
+                        dict[rawLine.Substring(0, sep).Trim()] = rawLine.Substring(sep + 1).Trim();
+                    }
+                }
+
+                string lastCropStr = "";
+                if (_lastNormalizedCropRect.HasValue)
+                {
+                    RectangleF c = _lastNormalizedCropRect.Value;
+                    lastCropStr = string.Format(
+                        System.Globalization.CultureInfo.InvariantCulture,
+                        "{0:0.######},{1:0.######},{2:0.######},{3:0.######}",
+                        c.X, c.Y, c.Width, c.Height);
+                }
+
+                dict["LastCrop"] = lastCropStr;
+                dict["SaveFolderPath"] = _saveFolderPath ?? "";
+
+                List<string> outLines = new List<string>();
+                foreach (var kv in dict)
+                {
+                    outLines.Add(kv.Key + "=" + kv.Value);
+                }
+                File.WriteAllLines(_settingsFilePath, outLines.ToArray());
+            }
+            catch { }
+        }
+
+        private static float ClampF(float val, float min, float max)
+        {
+            if (val < min) return min;
+            if (val > max) return max;
+            return val;
+        }
+
+        private static RectangleF ClampRectToBounds(RectangleF r, RectangleF bounds)
+        {
+            float x1 = ClampF(r.Left, bounds.Left, bounds.Right);
+            float y1 = ClampF(r.Top, bounds.Top, bounds.Bottom);
+            float x2 = ClampF(r.Right, bounds.Left, bounds.Right);
+            float y2 = ClampF(r.Bottom, bounds.Top, bounds.Bottom);
+            return new RectangleF(Math.Min(x1, x2), Math.Min(y1, y2), Math.Abs(x2 - x1), Math.Abs(y2 - y1));
+        }
+
+        private RectangleF GetDisplayedImageRect()
+        {
+            if (_currentBitmap == null) return RectangleF.Empty;
+            int topReserve = 48;
+            int sideReserve = 20;
+            int bottomReserve = 20;
+            int stageX = sideReserve / 2;
+            int stageY = topReserve;
+            int cw = ClientSize.Width - sideReserve;
+            int ch = ClientSize.Height - topReserve - bottomReserve;
+            if (cw <= 0 || ch <= 0) return RectangleF.Empty;
+            float scale = Math.Min((float)cw / _currentBitmap.Width, (float)ch / _currentBitmap.Height);
+            float dw = Math.Max(1f, _currentBitmap.Width * scale);
+            float dh = Math.Max(1f, _currentBitmap.Height * scale);
+            float dx = stageX + (cw - dw) * 0.5f;
+            float dy = stageY + (ch - dh) * 0.5f;
+            return new RectangleF(dx, dy, dw, dh);
+        }
+
+        private void ShowToast(string message)
+        {
+            _toastText = message ?? "";
+            _toastUntil = DateTime.UtcNow.AddSeconds(2.5);
+            if (!_uiOverlayTimer.Enabled) _uiOverlayTimer.Start();
+            Invalidate();
+        }
+
         private void LoadCurrent()
         {
             if (_currentIndex < 0 || _currentIndex >= _imageList.Count) return;
             string p = _imageList[_currentIndex];
-            Bitmap bmp = VirtualGridCanvas.LoadAnyImageBitmap(p, 2560);
+            Bitmap bmp = VirtualGridCanvas.LoadAnyImageBitmap(p, 3840);
             Bitmap old = _currentBitmap;
             _currentBitmap = bmp;
             if (old != null) old.Dispose();
-            Text = string.Format("[{0}/{1}] {2}  (←/→ 键或滚轮翻页，Esc 或双击关闭)", _currentIndex + 1, _imageList.Count, Path.GetFileName(p));
+            Text = string.Format("[{0}/{1}] {2}  (按 ~ 键截图，←/→ 键或滚轮翻页，Esc 或双击关闭)", _currentIndex + 1, _imageList.Count, Path.GetFileName(p));
+            Invalidate();
+        }
+
+        private void EnterScreenshotMode()
+        {
+            if (_currentBitmap == null) return;
+            LoadScreenshotSettings();
+            _saveLocationLabel.Text = _saveFolderPath;
+            _isScreenshotModeActive = true;
+            _cropMode = CropSelectionMode.None;
+            _activeResizeZone = CropHitZone.None;
+            _hasActiveSelection = false;
+            _currentSelectionRect = RectangleF.Empty;
+            _topSaveBarPanel.Visible = true;
+            _currentMousePt = PointToClient(Cursor.Position);
+            Cursor = Cursors.Cross;
+            ShowToast("已进入截图模式：左键拖拽或单击两点框选，按 R 恢复上次选框，再按 ~ 保存（无选框则保存全图）");
+            Invalidate();
+        }
+
+        private void ExitScreenshotMode()
+        {
+            _isScreenshotModeActive = false;
+            _cropMode = CropSelectionMode.None;
+            _activeResizeZone = CropHitZone.None;
+            _hasActiveSelection = false;
+            _currentSelectionRect = RectangleF.Empty;
+            _topSaveBarPanel.Visible = false;
+            Capture = false;
+            Cursor = Cursors.Default;
+            Invalidate();
+        }
+
+        private void HandleTildeShortcut()
+        {
+            long now = Environment.TickCount;
+            if (Math.Abs(now - _lastTildeTriggerTick) < 120) return;
+            _lastTildeTriggerTick = now;
+
+            if (_currentBitmap == null)
+            {
+                ShowToast("当前没有可截图的图像");
+                return;
+            }
+
+            if (!_isScreenshotModeActive)
+            {
+                EnterScreenshotMode();
+            }
+            else
+            {
+                RectangleF imgRect = GetDisplayedImageRect();
+                if ((_hasActiveSelection || _cropMode == CropSelectionMode.DraggingNew || _cropMode == CropSelectionMode.TwoClickBlueprint) &&
+                    _currentSelectionRect.Width >= 4f && _currentSelectionRect.Height >= 4f &&
+                    imgRect.Width > 0f && imgRect.Height > 0f)
+                {
+                    RectangleF clampedSel = ClampRectToBounds(_currentSelectionRect, imgRect);
+                    float normX = ClampF((clampedSel.X - imgRect.X) / imgRect.Width, 0f, 1f);
+                    float normY = ClampF((clampedSel.Y - imgRect.Y) / imgRect.Height, 0f, 1f);
+                    float normW = ClampF(clampedSel.Width / imgRect.Width, 0.001f, 1f - normX);
+                    float normH = ClampF(clampedSel.Height / imgRect.Height, 0.001f, 1f - normY);
+                    RectangleF normCrop = new RectangleF(normX, normY, normW, normH);
+                    _lastNormalizedCropRect = normCrop;
+                    SaveScreenshotSettings();
+                    SaveScreenshotAndPreview(normCrop);
+                }
+                else
+                {
+                    SaveScreenshotAndPreview(null);
+                }
+                ExitScreenshotMode();
+            }
+        }
+
+        private void RestoreLastCropSelection()
+        {
+            if (!_isScreenshotModeActive) return;
+            long now = Environment.TickCount;
+            if (Math.Abs(now - _lastKeyRTriggerTick) < 120) return;
+            _lastKeyRTriggerTick = now;
+
+            if (!_lastNormalizedCropRect.HasValue)
+            {
+                ShowToast("暂无上次裁剪框记录，请先框选一次");
+                return;
+            }
+
+            RectangleF imgRect = GetDisplayedImageRect();
+            if (imgRect.Width <= 0f || imgRect.Height <= 0f) return;
+
+            RectangleF norm = _lastNormalizedCropRect.Value;
+            float left = imgRect.X + norm.X * imgRect.Width;
+            float top = imgRect.Y + norm.Y * imgRect.Height;
+            float width = norm.Width * imgRect.Width;
+            float height = norm.Height * imgRect.Height;
+
+            RectangleF restored = ClampRectToBounds(new RectangleF(left, top, width, height), imgRect);
+            if (restored.Width < 4f || restored.Height < 4f) return;
+
+            _cropMode = CropSelectionMode.None;
+            _activeResizeZone = CropHitZone.None;
+            _hasActiveSelection = true;
+            _currentSelectionRect = restored;
+            UpdateCursorForZone(HitTestSelectionZone(_currentMousePt));
+            ShowToast("已恢复上次裁剪框范围（可拖动边框/内部微调，按 ~ 确认裁剪保存）");
+            Invalidate();
+        }
+
+        private void SaveScreenshotAndPreview(RectangleF? normalizedCrop)
+        {
+            try
+            {
+                if (_currentBitmap == null) return;
+                if (!Directory.Exists(_saveFolderPath))
+                    Directory.CreateDirectory(_saveFolderPath);
+
+                int srcW = _currentBitmap.Width;
+                int srcH = _currentBitmap.Height;
+                Rectangle cropPx = new Rectangle(0, 0, srcW, srcH);
+
+                if (normalizedCrop.HasValue)
+                {
+                    RectangleF c = normalizedCrop.Value;
+                    int x = (int)Math.Round(ClampF(c.X, 0f, 1f) * srcW);
+                    int y = (int)Math.Round(ClampF(c.Y, 0f, 1f) * srcH);
+                    int w = (int)Math.Round(ClampF(c.Width, 0.001f, 1f) * srcW);
+                    int h = (int)Math.Round(ClampF(c.Height, 0.001f, 1f) * srcH);
+                    if (x < 0) x = 0;
+                    if (y < 0) y = 0;
+                    if (x + w > srcW) w = srcW - x;
+                    if (y + h > srcH) h = srcH - y;
+                    if (w >= 2 && h >= 2)
+                    {
+                        cropPx = new Rectangle(x, y, w, h);
+                    }
+                }
+
+                string srcName = (_currentIndex >= 0 && _currentIndex < _imageList.Count)
+                    ? Path.GetFileNameWithoutExtension(_imageList[_currentIndex])
+                    : "Image";
+                foreach (char invalid in Path.GetInvalidFileNameChars())
+                {
+                    srcName = srcName.Replace(invalid, '_');
+                }
+                string suffix = normalizedCrop.HasValue ? "_crop" : "_full";
+                string fileName = string.Format("{0}_{1:yyyyMMdd_HHmmss_fff}{2}.png", srcName, DateTime.Now, suffix);
+                string fullSavePath = Path.Combine(_saveFolderPath, fileName);
+
+                using (Bitmap outBmp = new Bitmap(cropPx.Width, cropPx.Height, PixelFormat.Format32bppArgb))
+                {
+                    using (Graphics g = Graphics.FromImage(outBmp))
+                    {
+                        g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                        g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                        g.DrawImage(_currentBitmap, new Rectangle(0, 0, cropPx.Width, cropPx.Height), cropPx, GraphicsUnit.Pixel);
+                    }
+                    outBmp.Save(fullSavePath, ImageFormat.Png);
+
+                    // Create thumbnail for bottom-right preview banner
+                    int thumbW = 92;
+                    int thumbH = 52;
+                    Bitmap previewThumb = new Bitmap(thumbW, thumbH, PixelFormat.Format32bppArgb);
+                    using (Graphics tg = Graphics.FromImage(previewThumb))
+                    {
+                        tg.Clear(Color.Black);
+                        tg.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                        float s = Math.Min((float)thumbW / outBmp.Width, (float)thumbH / outBmp.Height);
+                        int dw = Math.Max(1, (int)Math.Round(outBmp.Width * s));
+                        int dh = Math.Max(1, (int)Math.Round(outBmp.Height * s));
+                        tg.DrawImage(outBmp, new Rectangle((thumbW - dw) / 2, (thumbH - dh) / 2, dw, dh));
+                    }
+
+                    Bitmap oldThumb = _savedPreviewThumb;
+                    _savedPreviewThumb = previewThumb;
+                    if (oldThumb != null) oldThumb.Dispose();
+                    _savedPreviewFileName = fileName;
+                    _savedPreviewFullPath = fullSavePath;
+                    _savedPreviewUntil = DateTime.UtcNow.AddSeconds(4.0);
+                }
+
+                ShowToast(string.Format("✔ 已保存截图 ({0}×{1}): {2}", cropPx.Width, cropPx.Height, fileName));
+                if (!_uiOverlayTimer.Enabled) _uiOverlayTimer.Start();
+                Invalidate();
+            }
+            catch (Exception ex)
+            {
+                ShowToast("截图保存失败: " + ex.Message);
+            }
+        }
+
+        private CropHitZone HitTestSelectionZone(PointF pt)
+        {
+            if (!_hasActiveSelection || _currentSelectionRect.Width < 4f || _currentSelectionRect.Height < 4f)
+                return CropHitZone.None;
+
+            const float tol = 8f;
+            RectangleF r = _currentSelectionRect;
+            bool nearLeft = Math.Abs(pt.X - r.Left) <= tol && pt.Y >= r.Top - tol && pt.Y <= r.Bottom + tol;
+            bool nearRight = Math.Abs(pt.X - r.Right) <= tol && pt.Y >= r.Top - tol && pt.Y <= r.Bottom + tol;
+            bool nearTop = Math.Abs(pt.Y - r.Top) <= tol && pt.X >= r.Left - tol && pt.X <= r.Right + tol;
+            bool nearBottom = Math.Abs(pt.Y - r.Bottom) <= tol && pt.X >= r.Left - tol && pt.X <= r.Right + tol;
+
+            CropHitZone zone = CropHitZone.None;
+            if (nearLeft) zone |= CropHitZone.Left;
+            else if (nearRight) zone |= CropHitZone.Right;
+
+            if (nearTop) zone |= CropHitZone.Top;
+            else if (nearBottom) zone |= CropHitZone.Bottom;
+
+            if (zone != CropHitZone.None) return zone;
+            if (r.Contains(pt)) return CropHitZone.Inside;
+            return CropHitZone.None;
+        }
+
+        private void UpdateCursorForZone(CropHitZone zone)
+        {
+            if (!_isScreenshotModeActive)
+            {
+                Cursor = Cursors.Default;
+                return;
+            }
+            if (_cropMode == CropSelectionMode.None && _hasActiveSelection)
+            {
+                if ((zone == (CropHitZone.Left | CropHitZone.Top)) || (zone == (CropHitZone.Right | CropHitZone.Bottom)))
+                {
+                    Cursor = Cursors.SizeNWSE;
+                    return;
+                }
+                if ((zone == (CropHitZone.Right | CropHitZone.Top)) || (zone == (CropHitZone.Left | CropHitZone.Bottom)))
+                {
+                    Cursor = Cursors.SizeNESW;
+                    return;
+                }
+                if ((zone & (CropHitZone.Left | CropHitZone.Right)) != 0)
+                {
+                    Cursor = Cursors.SizeWE;
+                    return;
+                }
+                if ((zone & (CropHitZone.Top | CropHitZone.Bottom)) != 0)
+                {
+                    Cursor = Cursors.SizeNS;
+                    return;
+                }
+                if (zone == CropHitZone.Inside)
+                {
+                    Cursor = Cursors.SizeAll;
+                    return;
+                }
+            }
+            Cursor = Cursors.Cross;
+        }
+
+        private void CancelCurrentSelection()
+        {
+            _cropMode = CropSelectionMode.None;
+            _activeResizeZone = CropHitZone.None;
+            _hasActiveSelection = false;
+            _currentSelectionRect = RectangleF.Empty;
+            Capture = false;
+            Cursor = Cursors.Cross;
+            Invalidate();
+        }
+
+        private void HandleRightClickBackInScreenshotMode()
+        {
+            if (_cropMode == CropSelectionMode.ResizingOrMoving)
+            {
+                _cropMode = CropSelectionMode.None;
+                _activeResizeZone = CropHitZone.None;
+                _currentSelectionRect = _resizeStartSelectionRect;
+                _hasActiveSelection = true;
+                Capture = false;
+                Invalidate();
+                return;
+            }
+            if (_cropMode != CropSelectionMode.None || _hasActiveSelection)
+            {
+                CancelCurrentSelection();
+                ShowToast("已清除当前裁剪选框（再按右键或 Esc 退出截图模式）");
+                return;
+            }
+            ExitScreenshotMode();
+            ShowToast("已退出截图模式");
+        }
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            base.OnMouseDown(e);
+
+            // Check if user clicked on the saved screenshot preview card in bottom-right corner
+            if (e.Button == MouseButtons.Left && _savedPreviewThumb != null && _savedPreviewCardBounds.Contains(e.Location))
+            {
+                if (!string.IsNullOrEmpty(_savedPreviewFullPath) && File.Exists(_savedPreviewFullPath))
+                {
+                    try { Process.Start("explorer.exe", "/select,\"" + _savedPreviewFullPath + "\""); } catch { }
+                }
+                return;
+            }
+
+            if (!_isScreenshotModeActive) return;
+
+            if (e.Button == MouseButtons.Right)
+            {
+                HandleRightClickBackInScreenshotMode();
+                return;
+            }
+
+            if (e.Button != MouseButtons.Left) return;
+
+            RectangleF imgRect = GetDisplayedImageRect();
+            if (imgRect.Width <= 0f || imgRect.Height <= 0f) return;
+
+            PointF clampedPos = new PointF(
+                ClampF(e.X, imgRect.Left, imgRect.Right),
+                ClampF(e.Y, imgRect.Top, imgRect.Bottom));
+            _mouseDownOverlayPoint = clampedPos;
+
+            // Case 1: TwoClickBlueprint -> Second click lands the crop box
+            if (_cropMode == CropSelectionMode.TwoClickBlueprint)
+            {
+                float left = Math.Min(_selectionStartPoint.X, clampedPos.X);
+                float top = Math.Min(_selectionStartPoint.Y, clampedPos.Y);
+                float width = Math.Abs(clampedPos.X - _selectionStartPoint.X);
+                float height = Math.Abs(clampedPos.Y - _selectionStartPoint.Y);
+
+                _cropMode = CropSelectionMode.None;
+                Capture = false;
+
+                if (width >= 4f && height >= 4f)
+                {
+                    _currentSelectionRect = ClampRectToBounds(new RectangleF(left, top, width, height), imgRect);
+                    _hasActiveSelection = true;
+                    ShowToast("裁剪框已落地：可拖动边框微调，或按 ~ 键确认裁剪保存");
+                }
+                else
+                {
+                    CancelCurrentSelection();
+                }
+                Invalidate();
+                return;
+            }
+
+            // Case 2: Existing crop box -> check if resizing or moving
+            if (_hasActiveSelection && _cropMode == CropSelectionMode.None)
+            {
+                CropHitZone hitZone = HitTestSelectionZone(clampedPos);
+                if (hitZone != CropHitZone.None)
+                {
+                    _cropMode = CropSelectionMode.ResizingOrMoving;
+                    _activeResizeZone = hitZone;
+                    _resizeStartMousePoint = clampedPos;
+                    _resizeStartSelectionRect = _currentSelectionRect;
+                    Capture = true;
+                    Invalidate();
+                    return;
+                }
+            }
+
+            // Case 3: Start new selection
+            _cropMode = CropSelectionMode.DraggingNew;
+            _hasActiveSelection = false;
+            _selectionStartPoint = clampedPos;
+            _currentSelectionRect = new RectangleF(clampedPos.X, clampedPos.Y, 0f, 0f);
+            Capture = true;
+            Invalidate();
+        }
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            base.OnMouseMove(e);
+            _currentMousePt = e.Location;
+
+            if (_savedPreviewThumb != null && _savedPreviewCardBounds.Contains(e.Location))
+            {
+                Cursor = Cursors.Hand;
+                return;
+            }
+
+            if (!_isScreenshotModeActive) return;
+
+            RectangleF imgRect = GetDisplayedImageRect();
+            PointF clampedPos = new PointF(
+                ClampF(e.X, imgRect.Left, imgRect.Right),
+                ClampF(e.Y, imgRect.Top, imgRect.Bottom));
+
+            if (_cropMode == CropSelectionMode.DraggingNew || _cropMode == CropSelectionMode.TwoClickBlueprint)
+            {
+                float left = Math.Min(_selectionStartPoint.X, clampedPos.X);
+                float top = Math.Min(_selectionStartPoint.Y, clampedPos.Y);
+                float width = Math.Abs(clampedPos.X - _selectionStartPoint.X);
+                float height = Math.Abs(clampedPos.Y - _selectionStartPoint.Y);
+                _currentSelectionRect = ClampRectToBounds(new RectangleF(left, top, width, height), imgRect);
+            }
+            else if (_cropMode == CropSelectionMode.ResizingOrMoving)
+            {
+                float dx = clampedPos.X - _resizeStartMousePoint.X;
+                float dy = clampedPos.Y - _resizeStartMousePoint.Y;
+                RectangleF r = _resizeStartSelectionRect;
+
+                if (_activeResizeZone == CropHitZone.Inside)
+                {
+                    float newLeft = ClampF(r.Left + dx, imgRect.Left, Math.Max(imgRect.Left, imgRect.Right - r.Width));
+                    float newTop = ClampF(r.Top + dy, imgRect.Top, Math.Max(imgRect.Top, imgRect.Bottom - r.Height));
+                    _currentSelectionRect = new RectangleF(newLeft, newTop, r.Width, r.Height);
+                }
+                else
+                {
+                    float left = r.Left;
+                    float right = r.Right;
+                    float top = r.Top;
+                    float bottom = r.Bottom;
+
+                    if ((_activeResizeZone & CropHitZone.Left) != 0) left = ClampF(left + dx, imgRect.Left, right - 4f);
+                    if ((_activeResizeZone & CropHitZone.Right) != 0) right = ClampF(right + dx, left + 4f, imgRect.Right);
+                    if ((_activeResizeZone & CropHitZone.Top) != 0) top = ClampF(top + dy, imgRect.Top, bottom - 4f);
+                    if ((_activeResizeZone & CropHitZone.Bottom) != 0) bottom = ClampF(bottom + dy, top + 4f, imgRect.Bottom);
+
+                    _currentSelectionRect = new RectangleF(left, top, Math.Max(4f, right - left), Math.Max(4f, bottom - top));
+                }
+            }
+            else
+            {
+                UpdateCursorForZone(HitTestSelectionZone(clampedPos));
+            }
+
+            Invalidate();
+        }
+
+        protected override void OnMouseUp(MouseEventArgs e)
+        {
+            base.OnMouseUp(e);
+            if (!_isScreenshotModeActive || e.Button != MouseButtons.Left) return;
+
+            RectangleF imgRect = GetDisplayedImageRect();
+            PointF clampedPos = new PointF(
+                ClampF(e.X, imgRect.Left, imgRect.Right),
+                ClampF(e.Y, imgRect.Top, imgRect.Bottom));
+
+            if (_cropMode == CropSelectionMode.DraggingNew)
+            {
+                float dragDist = (float)Math.Sqrt(
+                    Math.Pow(clampedPos.X - _mouseDownOverlayPoint.X, 2) +
+                    Math.Pow(clampedPos.Y - _mouseDownOverlayPoint.Y, 2));
+
+                if (dragDist < 5f)
+                {
+                    // Short click -> transition into TwoClickBlueprint mode
+                    _cropMode = CropSelectionMode.TwoClickBlueprint;
+                    Capture = false;
+                }
+                else
+                {
+                    _cropMode = CropSelectionMode.None;
+                    Capture = false;
+                    if (_currentSelectionRect.Width >= 4f && _currentSelectionRect.Height >= 4f)
+                    {
+                        _hasActiveSelection = true;
+                        ShowToast("裁剪框已就绪：可拖动边框微调，按 ~ 键保存截图");
+                    }
+                    else
+                    {
+                        CancelCurrentSelection();
+                    }
+                }
+            }
+            else if (_cropMode == CropSelectionMode.ResizingOrMoving)
+            {
+                _cropMode = CropSelectionMode.None;
+                _activeResizeZone = CropHitZone.None;
+                _hasActiveSelection = true;
+                Capture = false;
+            }
+
+            UpdateCursorForZone(HitTestSelectionZone(clampedPos));
             Invalidate();
         }
 
         protected override void OnPaint(PaintEventArgs e)
         {
-            e.Graphics.Clear(BackColor);
+            Graphics g = e.Graphics;
+            g.Clear(BackColor);
             if (_currentBitmap == null) return;
-            int cw = ClientSize.Width - 20;
-            int ch = ClientSize.Height - 20;
-            if (cw <= 0 || ch <= 0) return;
-            float scale = Math.Min((float)cw / _currentBitmap.Width, (float)ch / _currentBitmap.Height);
-            int dw = Math.Max(1, (int)(_currentBitmap.Width * scale));
-            int dh = Math.Max(1, (int)(_currentBitmap.Height * scale));
-            int dx = (ClientSize.Width - dw) / 2;
-            int dy = (ClientSize.Height - dh) / 2;
-            e.Graphics.InterpolationMode = InterpolationMode.HighQualityBicubic;
-            e.Graphics.DrawImage(_currentBitmap, new Rectangle(dx, dy, dw, dh));
+
+            RectangleF imgRect = GetDisplayedImageRect();
+            if (imgRect.Width <= 0f || imgRect.Height <= 0f) return;
+
+            g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+            g.DrawImage(_currentBitmap, imgRect.X, imgRect.Y, imgRect.Width, imgRect.Height);
+
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+
+            // Screenshot Mode Overlay: Dim outside selection, crosshair, selection box, 8 handles, size tag, and live magnifier
+            if (_isScreenshotModeActive)
+            {
+                bool hasBox = (_hasActiveSelection || _cropMode == CropSelectionMode.DraggingNew || _cropMode == CropSelectionMode.TwoClickBlueprint || _cropMode == CropSelectionMode.ResizingOrMoving) &&
+                              _currentSelectionRect.Width >= 2f && _currentSelectionRect.Height >= 2f;
+
+                if (hasBox)
+                {
+                    RectangleF sel = _currentSelectionRect;
+                    using (SolidBrush dimBrush = new SolidBrush(Color.FromArgb(120, 0, 0, 0)))
+                    {
+                        // Dim 4 regions around selection inside image
+                        g.FillRectangle(dimBrush, imgRect.Left, imgRect.Top, imgRect.Width, Math.Max(0f, sel.Top - imgRect.Top));
+                        g.FillRectangle(dimBrush, imgRect.Left, sel.Bottom, imgRect.Width, Math.Max(0f, imgRect.Bottom - sel.Bottom));
+                        g.FillRectangle(dimBrush, imgRect.Left, sel.Top, Math.Max(0f, sel.Left - imgRect.Left), sel.Height);
+                        g.FillRectangle(dimBrush, sel.Right, sel.Top, Math.Max(0f, imgRect.Right - sel.Right), sel.Height);
+                    }
+
+                    bool isBlueprint = (_cropMode == CropSelectionMode.DraggingNew || _cropMode == CropSelectionMode.TwoClickBlueprint);
+                    using (SolidBrush fillBrush = new SolidBrush(Color.FromArgb(isBlueprint ? 22 : 12, 0, 229, 255)))
+                    {
+                        g.FillRectangle(fillBrush, sel.X, sel.Y, sel.Width, sel.Height);
+                    }
+                    using (Pen borderPen = new Pen(Color.FromArgb(0, 229, 255), 2f))
+                    {
+                        if (isBlueprint) borderPen.DashPattern = new float[] { 4f, 3f };
+                        g.DrawRectangle(borderPen, sel.X, sel.Y, sel.Width, sel.Height);
+                    }
+
+                    // 8 Resize Handles
+                    if (!isBlueprint && _hasActiveSelection)
+                    {
+                        float cx = sel.Left + sel.Width * 0.5f;
+                        float cy = sel.Top + sel.Height * 0.5f;
+                        PointF[] pts = new PointF[]
+                        {
+                            new PointF(sel.Left, sel.Top),
+                            new PointF(cx, sel.Top),
+                            new PointF(sel.Right, sel.Top),
+                            new PointF(sel.Right, cy),
+                            new PointF(sel.Right, sel.Bottom),
+                            new PointF(cx, sel.Bottom),
+                            new PointF(sel.Left, sel.Bottom),
+                            new PointF(sel.Left, cy)
+                        };
+                        using (SolidBrush hFill = new SolidBrush(Color.White))
+                        using (Pen hPen = new Pen(Color.FromArgb(0, 229, 255), 1.5f))
+                        {
+                            for (int i = 0; i < pts.Length; i++)
+                            {
+                                g.FillRectangle(hFill, pts[i].X - 4f, pts[i].Y - 4f, 8f, 8f);
+                                g.DrawRectangle(hPen, pts[i].X - 4f, pts[i].Y - 4f, 8f, 8f);
+                            }
+                        }
+                    }
+
+                    // Real Image Pixel Dimensions Tag
+                    int realW = Math.Max(1, (int)Math.Round((sel.Width / imgRect.Width) * _currentBitmap.Width));
+                    int realH = Math.Max(1, (int)Math.Round((sel.Height / imgRect.Height) * _currentBitmap.Height));
+                    string sizeText = string.Format("{0} × {1} px", realW, realH);
+                    using (Font tagFont = new Font("Consolas", 9.5f, FontStyle.Bold))
+                    {
+                        SizeF ts = g.MeasureString(sizeText, tagFont);
+                        float tagW = ts.Width + 12f;
+                        float tagH = ts.Height + 6f;
+                        float tagX = ClampF(sel.Left, imgRect.Left, Math.Max(imgRect.Left, imgRect.Right - tagW));
+                        float tagY = sel.Top - tagH - 6f;
+                        if (tagY < 48f) tagY = sel.Top + 6f;
+
+                        using (SolidBrush bg = new SolidBrush(Color.FromArgb(230, 18, 22, 28)))
+                        using (Pen bp = new Pen(Color.FromArgb(0, 229, 255), 1f))
+                        {
+                            g.FillRectangle(bg, tagX, tagY, tagW, tagH);
+                            g.DrawRectangle(bp, tagX, tagY, tagW, tagH);
+                        }
+                        g.DrawString(sizeText, tagFont, Brushes.White, tagX + 6f, tagY + 3f);
+                    }
+                }
+
+                // Aiming Crosshair Lines & Live Magnifier when aiming or dragging
+                if (_cropMode != CropSelectionMode.ResizingOrMoving && _currentMousePt.Y >= 44)
+                {
+                    using (Pen aimPen = new Pen(Color.FromArgb(165, 0, 229, 255), 1f))
+                    {
+                        aimPen.DashPattern = new float[] { 4f, 4f };
+                        g.DrawLine(aimPen, 0, _currentMousePt.Y, ClientSize.Width, _currentMousePt.Y);
+                        g.DrawLine(aimPen, _currentMousePt.X, 42, _currentMousePt.X, ClientSize.Height);
+                    }
+
+                    // Draw Live 4x Magnifier Card near cursor
+                    DrawMagnifierOverlay(g, imgRect, _currentMousePt);
+                }
+            }
+
+            // Saved Screenshot Preview Card (bottom-right)
+            if (_savedPreviewThumb != null)
+            {
+                int cardW = 360;
+                int cardH = 66;
+                int cardX = ClientSize.Width - cardW - 18;
+                int cardY = ClientSize.Height - cardH - 18;
+                _savedPreviewCardBounds = new Rectangle(cardX, cardY, cardW, cardH);
+
+                using (SolidBrush bg = new SolidBrush(Color.FromArgb(245, 24, 28, 34)))
+                using (Pen bp = new Pen(Color.FromArgb(0, 229, 255), 1.5f))
+                {
+                    g.FillRectangle(bg, _savedPreviewCardBounds);
+                    g.DrawRectangle(bp, _savedPreviewCardBounds);
+                }
+                g.DrawImage(_savedPreviewThumb, cardX + 8, cardY + 7, 92, 52);
+                using (Pen tp = new Pen(Color.FromArgb(80, 255, 255, 255), 1f))
+                {
+                    g.DrawRectangle(tp, cardX + 8, cardY + 7, 92, 52);
+                }
+                using (Font fTitle = new Font("Microsoft YaHei UI", 9f, FontStyle.Bold))
+                using (Font fSub = new Font("Microsoft YaHei UI", 8.2f, FontStyle.Regular))
+                using (SolidBrush cyanBrush = new SolidBrush(Color.FromArgb(0, 229, 255)))
+                using (SolidBrush grayBrush = new SolidBrush(Color.FromArgb(170, 175, 185)))
+                {
+                    g.DrawString("✔ 已自动保存截图（点击在文件夹中定位）", fTitle, cyanBrush, cardX + 108, cardY + 8);
+                    StringFormat sf = new StringFormat { Trimming = StringTrimming.EllipsisCharacter, FormatFlags = StringFormatFlags.NoWrap };
+                    g.DrawString(_savedPreviewFileName, fSub, Brushes.White, new RectangleF(cardX + 108, cardY + 28, cardW - 116, 18), sf);
+                    g.DrawString(_savedPreviewFullPath, fSub, grayBrush, new RectangleF(cardX + 108, cardY + 45, cardW - 116, 18), sf);
+                }
+            }
+            else
+            {
+                _savedPreviewCardBounds = Rectangle.Empty;
+            }
+
+            // Status Toast Notification (bottom-center)
+            if (!string.IsNullOrEmpty(_toastText) && DateTime.UtcNow < _toastUntil)
+            {
+                using (Font toastFont = new Font("Microsoft YaHei UI", 9.5f, FontStyle.Bold))
+                {
+                    SizeF ts = g.MeasureString(_toastText, toastFont);
+                    float tw = ts.Width + 28f;
+                    float th = ts.Height + 14f;
+                    float tx = (ClientSize.Width - tw) * 0.5f;
+                    float ty = ClientSize.Height - th - 26f;
+                    using (SolidBrush bg = new SolidBrush(Color.FromArgb(232, 18, 24, 30)))
+                    using (Pen bp = new Pen(Color.FromArgb(0, 229, 255), 1.4f))
+                    {
+                        g.FillRectangle(bg, tx, ty, tw, th);
+                        g.DrawRectangle(bp, tx, ty, tw, th);
+                    }
+                    g.DrawString(_toastText, toastFont, Brushes.White, tx + 14f, ty + 7f);
+                }
+            }
+        }
+
+        private void DrawMagnifierOverlay(Graphics g, RectangleF imgRect, Point mousePt)
+        {
+            if (_currentBitmap == null || imgRect.Width <= 0f || imgRect.Height <= 0f) return;
+
+            float normX = ClampF((mousePt.X - imgRect.Left) / imgRect.Width, 0f, 1f);
+            float normY = ClampF((mousePt.Y - imgRect.Top) / imgRect.Height, 0f, 1f);
+            int srcX = Math.Min(_currentBitmap.Width - 1, Math.Max(0, (int)Math.Round(normX * (_currentBitmap.Width - 1))));
+            int srcY = Math.Min(_currentBitmap.Height - 1, Math.Max(0, (int)Math.Round(normY * (_currentBitmap.Height - 1))));
+
+            int magW = 136;
+            int magH = 142;
+            int boxX = mousePt.X + 22;
+            int boxY = mousePt.Y + 22;
+            if (boxX + magW > ClientSize.Width - 12) boxX = mousePt.X - magW - 22;
+            if (boxY + magH > ClientSize.Height - 12) boxY = mousePt.Y - magH - 22;
+            if (boxY < 48) boxY = 48;
+
+            using (SolidBrush bg = new SolidBrush(Color.FromArgb(242, 18, 20, 24)))
+            using (Pen bp = new Pen(Color.FromArgb(0, 229, 255), 1.5f))
+            {
+                g.FillRectangle(bg, boxX, boxY, magW, magH);
+                g.DrawRectangle(bp, boxX, boxY, magW, magH);
+            }
+
+            Rectangle zoomDest = new Rectangle(boxX + 6, boxY + 6, 124, 92);
+            int sampleW = 31;
+            int sampleH = 23;
+            Rectangle sampleSrc = new Rectangle(srcX - sampleW / 2, srcY - sampleH / 2, sampleW, sampleH);
+
+            GraphicsState state = g.Save();
+            g.SetClip(zoomDest);
+            g.Clear(Color.Black);
+            g.InterpolationMode = InterpolationMode.NearestNeighbor;
+            g.PixelOffsetMode = PixelOffsetMode.Half;
+            g.DrawImage(_currentBitmap, zoomDest, sampleSrc, GraphicsUnit.Pixel);
+            g.Restore(state);
+
+            using (Pen chPen = new Pen(Color.FromArgb(200, 0, 229, 255), 1f))
+            {
+                int cx = zoomDest.Left + zoomDest.Width / 2;
+                int cy = zoomDest.Top + zoomDest.Height / 2;
+                g.DrawLine(chPen, zoomDest.Left, cy, zoomDest.Right, cy);
+                g.DrawLine(chPen, cx, zoomDest.Top, cx, zoomDest.Bottom);
+                g.DrawRectangle(chPen, zoomDest);
+            }
+
+            Color pxColor = Color.Black;
+            try { pxColor = _currentBitmap.GetPixel(srcX, srcY); } catch { }
+
+            using (Font f = new Font("Consolas", 8.5f, FontStyle.Regular))
+            using (SolidBrush swatch = new SolidBrush(pxColor))
+            using (Pen sp = new Pen(Color.FromArgb(160, 255, 255, 255), 1f))
+            {
+                g.DrawString(string.Format("({0}, {1})", srcX, srcY), f, Brushes.White, boxX + 6, boxY + 102);
+                g.FillRectangle(swatch, boxX + 8, boxY + 121, 12, 12);
+                g.DrawRectangle(sp, boxX + 8, boxY + 121, 12, 12);
+                g.DrawString(string.Format("#{0:X2}{1:X2}{2:X2}", pxColor.R, pxColor.G, pxColor.B), f, Brushes.LightGray, boxX + 25, boxY + 120);
+            }
         }
 
         protected override void OnMouseWheel(MouseEventArgs e)
@@ -1799,19 +2820,83 @@ namespace DshGalleryExplorer
 
         protected override void OnMouseDoubleClick(MouseEventArgs e)
         {
+            if (_isScreenshotModeActive) return;
+            if (_savedPreviewThumb != null && _savedPreviewCardBounds.Contains(e.Location)) return;
             Close();
+        }
+
+        protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+        {
+            const int WM_KEYDOWN = 0x0100;
+            const int WM_SYSKEYDOWN = 0x0104;
+            if (msg.Msg == WM_KEYDOWN || msg.Msg == WM_SYSKEYDOWN)
+            {
+                Keys keyCode = keyData & Keys.KeyCode;
+                int scanCode = (int)((msg.LParam.ToInt64() >> 16) & 0xFF);
+                // Physical tilde (~ / `) key is Keys.Oemtilde (0xC0) or ScanCode 0x29 even when Chinese IME returns VK_PROCESSKEY (229)
+                if (keyCode == Keys.Oemtilde || scanCode == 0x29)
+                {
+                    HandleTildeShortcut();
+                    return true;
+                }
+                if (_isScreenshotModeActive && (keyCode == Keys.R || scanCode == 0x13))
+                {
+                    RestoreLastCropSelection();
+                    return true;
+                }
+            }
+            return base.ProcessCmdKey(ref msg, keyData);
         }
 
         protected override void OnKeyDown(KeyEventArgs e)
         {
-            if (e.KeyCode == Keys.Escape || e.KeyCode == Keys.Back || e.KeyCode == Keys.Space) Close();
-            else if ((e.KeyCode == Keys.Right || e.KeyCode == Keys.Down) && _currentIndex + 1 < _imageList.Count) { _currentIndex++; LoadCurrent(); }
-            else if ((e.KeyCode == Keys.Left || e.KeyCode == Keys.Up) && _currentIndex > 0) { _currentIndex--; LoadCurrent(); }
+            if (e.KeyCode == Keys.Oemtilde)
+            {
+                HandleTildeShortcut();
+                e.Handled = true;
+                return;
+            }
+            if (_isScreenshotModeActive && e.KeyCode == Keys.R)
+            {
+                RestoreLastCropSelection();
+                e.Handled = true;
+                return;
+            }
+            if (e.KeyCode == Keys.Escape)
+            {
+                if (_isScreenshotModeActive)
+                {
+                    HandleRightClickBackInScreenshotMode();
+                    e.Handled = true;
+                    return;
+                }
+                Close();
+                return;
+            }
+            if (e.KeyCode == Keys.Back || e.KeyCode == Keys.Space)
+            {
+                if (!_isScreenshotModeActive) Close();
+            }
+            else if ((e.KeyCode == Keys.Right || e.KeyCode == Keys.Down) && _currentIndex + 1 < _imageList.Count)
+            {
+                _currentIndex++;
+                LoadCurrent();
+            }
+            else if ((e.KeyCode == Keys.Left || e.KeyCode == Keys.Up) && _currentIndex > 0)
+            {
+                _currentIndex--;
+                LoadCurrent();
+            }
         }
 
         protected override void Dispose(bool disposing)
         {
-            if (disposing && _currentBitmap != null) { _currentBitmap.Dispose(); _currentBitmap = null; }
+            if (disposing)
+            {
+                if (_uiOverlayTimer != null) { _uiOverlayTimer.Stop(); _uiOverlayTimer.Dispose(); _uiOverlayTimer = null; }
+                if (_currentBitmap != null) { _currentBitmap.Dispose(); _currentBitmap = null; }
+                if (_savedPreviewThumb != null) { _savedPreviewThumb.Dispose(); _savedPreviewThumb = null; }
+            }
             base.Dispose(disposing);
         }
     }
@@ -2025,7 +3110,28 @@ namespace DshGalleryExplorer
 
         public string CurrentVideoPath { get { return _currentVideoPath; } }
 
-        public void ShowOrUpdatePreview(string videoPath, Point cursorScreenPt)
+        private static System.Windows.Media.Imaging.BitmapImage ConvertGdiBitmapToWpfBitmapImage(Bitmap bmp)
+        {
+            if (bmp == null) return null;
+            try
+            {
+                using (MemoryStream ms = new MemoryStream())
+                {
+                    bmp.Save(ms, ImageFormat.Jpeg);
+                    ms.Position = 0;
+                    System.Windows.Media.Imaging.BitmapImage bmi = new System.Windows.Media.Imaging.BitmapImage();
+                    bmi.BeginInit();
+                    bmi.CacheOption = System.Windows.Media.Imaging.BitmapCacheOption.OnLoad;
+                    bmi.StreamSource = ms;
+                    bmi.EndInit();
+                    bmi.Freeze();
+                    return bmi;
+                }
+            }
+            catch { return null; }
+        }
+
+        public void ShowOrUpdatePreview(string videoPath, Point cursorScreenPt, Bitmap fallbackCoverBitmap = null)
         {
             if (string.IsNullOrEmpty(videoPath) || !File.Exists(videoPath))
             {
@@ -2049,23 +3155,86 @@ namespace DshGalleryExplorer
                 {
                     _activeFrameJpegs = new List<byte[]>();
                 }
-                _highFpsImage.Source = null;
-                _highFpsImage.Visibility = System.Windows.Visibility.Collapsed;
-                _mediaElement.Visibility = System.Windows.Visibility.Visible;
 
                 _titleText.Text = Path.GetFileName(videoPath);
-                _timeBadgeText.Text = "加载中...";
                 _progressFill.Width = 0;
 
-                try
+                // 0ms Instant Check: If memory reel cache already has the 612-frame stream, play immediately with zero delay!
+                List<byte[]> memCached;
+                if (_memoryReelCache.TryGetValue(videoPath, out memCached) && memCached != null && memCached.Count > 30)
                 {
-                    _mediaElement.Stop();
-                    _mediaElement.ScrubbingEnabled = false;
-                    _mediaElement.SpeedRatio = 1.0;
-                    _mediaElement.Source = new Uri(videoPath, UriKind.Absolute);
-                    _mediaElement.Play();
+                    lock (_framesLock)
+                    {
+                        _activeFrameJpegs = memCached;
+                    }
+                    _isHighFpsStreamMode = true;
+                    _mediaReady = true;
+                    _durationSeconds = 15.0;
+                    _currentSpeedRatio = 3.0;
+                    _lastRenderedFrameIdx = 0;
+                    System.Windows.Media.Imaging.BitmapImage firstBmi = DecodeJpegBytesToBitmapImage(memCached[0]);
+                    if (firstBmi != null)
+                    {
+                        _highFpsImage.Source = firstBmi;
+                        if (firstBmi.PixelWidth > 0 && firstBmi.PixelHeight > 0)
+                        {
+                            ApplyPreviewWindowAspect(firstBmi.PixelWidth, firstBmi.PixelHeight);
+                        }
+                    }
+                    _highFpsImage.Visibility = System.Windows.Visibility.Visible;
+                    _mediaElement.Visibility = System.Windows.Visibility.Collapsed;
+                    _timeBadgeText.Text = string.Format("0.0s ({0}帧·120fps)", memCached.Count);
+                    _cycleClock.Restart();
+                    try
+                    {
+                        _mediaElement.Stop();
+                        _mediaElement.Source = null;
+                    }
+                    catch { }
                 }
-                catch { }
+                else
+                {
+                    // Display cover bitmap immediately at 0ms so the user NEVER sees a black screen while MediaElement/FFmpeg initializes!
+                    System.Windows.Media.Imaging.BitmapImage coverBmi = ConvertGdiBitmapToWpfBitmapImage(fallbackCoverBitmap);
+                    if (coverBmi != null)
+                    {
+                        if (coverBmi.PixelWidth > 0 && coverBmi.PixelHeight > 0)
+                        {
+                            ApplyPreviewWindowAspect(coverBmi.PixelWidth, coverBmi.PixelHeight);
+                        }
+                        _highFpsImage.Source = coverBmi;
+                        _highFpsImage.Visibility = System.Windows.Visibility.Visible;
+                        // Keep _mediaElement underneath or hidden until ready so black surface never covers the cover thumbnail
+                        _mediaElement.Visibility = System.Windows.Visibility.Hidden;
+                    }
+                    else
+                    {
+                        _highFpsImage.Source = null;
+                        _highFpsImage.Visibility = System.Windows.Visibility.Collapsed;
+                        _mediaElement.Visibility = System.Windows.Visibility.Visible;
+                    }
+
+                    _timeBadgeText.Text = "极速加载中...";
+
+                    // Parallel Track A: Kick off FFmpeg disk-reel check & fast probe + chunk-0 stream immediately on background thread
+                    // without waiting 300-800ms for WPF MediaElement.MediaOpened!
+                    string ffmpegExe = ResolveFfmpegPath();
+                    if (!string.IsNullOrEmpty(ffmpegExe))
+                    {
+                        StartImmediateReelOrProbePipeline(videoPath, gen, ffmpegExe);
+                    }
+
+                    // Parallel Track B: Also start native MediaElement for short clips (<= 20s)
+                    try
+                    {
+                        _mediaElement.Stop();
+                        _mediaElement.ScrubbingEnabled = false;
+                        _mediaElement.SpeedRatio = 1.0;
+                        _mediaElement.Source = new Uri(videoPath, UriKind.Absolute);
+                        _mediaElement.Play();
+                    }
+                    catch { }
+                }
             }
 
             if (!IsVisible)
@@ -2073,6 +3242,83 @@ namespace DshGalleryExplorer
                 Show();
             }
             EnsureRenderingHook(true);
+        }
+
+        private void StartImmediateReelOrProbePipeline(string videoPath, int gen, string ffmpegExe)
+        {
+            ThreadPool.QueueUserWorkItem(_ =>
+            {
+                try
+                {
+                    if (gen != _streamGeneration) return;
+
+                    // 1. Check disk reel cache first (~3-5ms if previously hovered)
+                    string diskCachePath = GetReelDiskCachePath(videoPath);
+                    List<byte[]> diskFrames = TryLoadReelFromDisk(diskCachePath);
+                    if (diskFrames != null && diskFrames.Count > 30)
+                    {
+                        _memoryReelCache[videoPath] = diskFrames;
+                        double probedDur = 0.0;
+                        int pvw = 0, pvh = 0;
+                        ProbeVideoDurationAndResolutionViaFfmpeg(ffmpegExe, videoPath, out probedDur, out pvw, out pvh);
+                        if (probedDur <= 0.05) probedDur = 15.0;
+
+                        if (gen == _streamGeneration)
+                        {
+                            lock (_framesLock)
+                            {
+                                _activeFrameJpegs = diskFrames;
+                            }
+                            Dispatcher.BeginInvoke(new Action(() =>
+                            {
+                                if (gen != _streamGeneration || !string.Equals(_currentVideoPath, videoPath, StringComparison.OrdinalIgnoreCase))
+                                    return;
+                                _durationSeconds = probedDur;
+                                _currentSpeedRatio = Math.Max(1.0, probedDur / TARGET_PREVIEW_CYCLE_SECONDS);
+                                _mediaReady = true;
+                                _isHighFpsStreamMode = true;
+                                if (pvw > 0 && pvh > 0) ApplyPreviewWindowAspect(pvw, pvh);
+                                try { _mediaElement.Pause(); } catch { }
+                                _highFpsImage.Visibility = System.Windows.Visibility.Visible;
+                                _mediaElement.Visibility = System.Windows.Visibility.Collapsed;
+                                _cycleClock.Restart();
+                            }));
+                        }
+                        return;
+                    }
+
+                    // 2. Probe duration & resolution via FFmpeg (~35ms)
+                    double dur;
+                    int vw, vh;
+                    if (!ProbeVideoDurationAndResolutionViaFfmpeg(ffmpegExe, videoPath, out dur, out vw, out vh) || dur <= 0.05)
+                    {
+                        return;
+                    }
+                    if (gen != _streamGeneration) return;
+
+                    double idealSpeed = dur / TARGET_PREVIEW_CYCLE_SECONDS;
+                    // If medium/long video (> 20s, idealSpeed > 4.0x), immediately start High-FPS Reel Stream without waiting for MediaElement!
+                    if (idealSpeed > 4.0)
+                    {
+                        Dispatcher.BeginInvoke(new Action(() =>
+                        {
+                            if (gen != _streamGeneration || !string.Equals(_currentVideoPath, videoPath, StringComparison.OrdinalIgnoreCase))
+                                return;
+                            _durationSeconds = dur;
+                            _currentSpeedRatio = Math.Max(1.0, idealSpeed);
+                            _mediaReady = true;
+                            _isHighFpsStreamMode = true;
+                            if (vw > 0 && vh > 0) ApplyPreviewWindowAspect(vw, vh);
+                            try { _mediaElement.Pause(); } catch { }
+                            _cycleClock.Restart();
+                            _fpsWindowStartMs = 0;
+                            _framesPresentedInSec = 0;
+                        }));
+                        StartHighFpsReelStream(videoPath, dur, gen, ffmpegExe);
+                    }
+                }
+                catch { }
+            });
         }
 
         public void HidePreview()
@@ -2269,32 +3515,31 @@ namespace DshGalleryExplorer
 
         private void OnMediaOpened(object sender, System.Windows.RoutedEventArgs e)
         {
-            _mediaReady = true;
-            _durationSeconds = _mediaElement.NaturalDuration.HasTimeSpan
+            double openedDur = _mediaElement.NaturalDuration.HasTimeSpan
                 ? _mediaElement.NaturalDuration.TimeSpan.TotalSeconds
                 : 0.0;
+            if (openedDur > 0.05)
+            {
+                _durationSeconds = openedDur;
+            }
 
             int vw = _mediaElement.NaturalVideoWidth;
             int vh = _mediaElement.NaturalVideoHeight;
             if (vw > 0 && vh > 0)
             {
-                double aspect = (double)vw / vh;
-                if (aspect >= 1.0)
-                {
-                    Width = 440;
-                    int stageH = Math.Max(156, Math.Min(310, (int)Math.Round(440.0 / aspect)));
-                    Height = stageH + HEADER_FOOTER_HEIGHT;
-                }
-                else
-                {
-                    int stageH = 320;
-                    int stageW = Math.Max(220, Math.Min(390, (int)Math.Round(stageH * aspect)));
-                    Width = stageW;
-                    Height = stageH + HEADER_FOOTER_HEIGHT;
-                }
-                UpdatePopupPosition(System.Windows.Forms.Cursor.Position, true);
+                ApplyPreviewWindowAspect(vw, vh);
             }
 
+            // If our fast background FFmpeg probe/reel pipeline already took over in High-FPS Stream Mode,
+            // keep _mediaElement paused and do NOT restart or duplicate the FFmpeg stream!
+            if (_isHighFpsStreamMode)
+            {
+                _mediaReady = true;
+                try { _mediaElement.Pause(); } catch { }
+                return;
+            }
+
+            _mediaReady = true;
             _cycleClock.Restart();
             _fpsWindowStartMs = 0;
             _framesPresentedInSec = 0;
@@ -2303,6 +3548,8 @@ namespace DshGalleryExplorer
             {
                 _currentSpeedRatio = 1.0;
                 _isHighFpsStreamMode = false;
+                _highFpsImage.Visibility = System.Windows.Visibility.Collapsed;
+                _mediaElement.Visibility = System.Windows.Visibility.Visible;
                 return;
             }
 
@@ -2483,15 +3730,102 @@ namespace DshGalleryExplorer
                         return;
                     }
 
-                    // Stream-extract 36 chunks across the video timeline concurrently (4 workers in parallel, ordered assembly)
+                    // Stream-extract 36 chunks across the video timeline:
+                    // Extract Chunk 0 FIRST without contention so the first 17 frames appear in ~50-80ms,
+                    // then extract remaining chunks 1..35 across 3 concurrent background workers!
                     int chunkCount = TARGET_REEL_CHUNKS;
                     int framesPerChunk = TARGET_FRAMES_PER_CHUNK;
                     double usableDur = Math.Max(1.0, durationSec * 0.985);
                     List<byte[]>[] chunkResults = new List<byte[]>[chunkCount];
-                    int nextChunk = 0;
-                    int completedChunks = 0;
+
+                    Action<int> extractSingleChunk = (int cIdx) =>
+                    {
+                        if (gen != _streamGeneration) return;
+                        double seekSec = (cIdx * usableDur) / chunkCount;
+                        string args = string.Format(
+                            System.Globalization.CultureInfo.InvariantCulture,
+                            "-hide_banner -loglevel error -noaccurate_seek -threads 2 -flags2 fast -skip_loop_filter all -ss {0:0.00} -i \"{1}\" -frames:v {2} -an -vf \"scale=540:-2:flags=fast_bilinear\" -pix_fmt yuvj420p -strict -2 -q:v 4 -f mjpeg pipe:1",
+                            seekSec, videoPath, framesPerChunk);
+
+                        ProcessStartInfo psi = new ProcessStartInfo
+                        {
+                            FileName = ffmpegExe,
+                            Arguments = args,
+                            UseShellExecute = false,
+                            CreateNoWindow = true,
+                            RedirectStandardOutput = true,
+                            RedirectStandardError = false
+                        };
+
+                        using (Process proc = Process.Start(psi))
+                        {
+                            if (proc != null)
+                            {
+                                using (MemoryStream ms = new MemoryStream(262144))
+                                {
+                                    byte[] buf = new byte[32768];
+                                    int read;
+                                    while ((read = proc.StandardOutput.BaseStream.Read(buf, 0, buf.Length)) > 0)
+                                    {
+                                        if (gen != _streamGeneration)
+                                        {
+                                            try { proc.Kill(); } catch { }
+                                            break;
+                                        }
+                                        ms.Write(buf, 0, read);
+                                    }
+                                    try { proc.WaitForExit(1500); } catch { }
+                                    byte[] rawBytes = ms.GetBuffer();
+                                    int rawLen = (int)ms.Length;
+                                    List<byte[]> parsed = ParseConcatenatedJpegs(rawBytes, rawLen);
+                                    chunkResults[cIdx] = parsed;
+                                }
+                            }
+                        }
+
+                        if (gen == _streamGeneration)
+                        {
+                            List<byte[]> progressive = new List<byte[]>(chunkCount * framesPerChunk);
+                            for (int k = 0; k < chunkCount; k++)
+                            {
+                                if (chunkResults[k] != null && chunkResults[k].Count > 0)
+                                {
+                                    progressive.AddRange(chunkResults[k]);
+                                }
+                            }
+                            if (progressive.Count > 0)
+                            {
+                                bool firstSwitch = false;
+                                lock (_framesLock)
+                                {
+                                    firstSwitch = (_activeFrameJpegs.Count == 0);
+                                    _activeFrameJpegs = progressive;
+                                }
+                                if (firstSwitch)
+                                {
+                                    Dispatcher.BeginInvoke(new Action(() =>
+                                    {
+                                        if (gen == _streamGeneration)
+                                        {
+                                            _highFpsImage.Visibility = System.Windows.Visibility.Visible;
+                                            _mediaElement.Visibility = System.Windows.Visibility.Collapsed;
+                                            _cycleClock.Restart();
+                                        }
+                                    }));
+                                }
+                            }
+                        }
+                    };
+
+                    // Priority Step 1: Extract Chunk 0 immediately with zero process contention!
+                    extractSingleChunk(0);
+                    if (gen != _streamGeneration) return;
+
+                    // Priority Step 2: Extract remaining Chunks 1..35 across 3 concurrent workers
+                    int nextChunk = 1;
+                    int completedWorkers = 0;
                     ManualResetEvent allDone = new ManualResetEvent(false);
-                    int workerCount = 4;
+                    int workerCount = 3;
 
                     for (int w = 0; w < workerCount; w++)
                     {
@@ -2504,88 +3838,13 @@ namespace DshGalleryExplorer
                                     if (gen != _streamGeneration) break;
                                     int cIdx = Interlocked.Increment(ref nextChunk) - 1;
                                     if (cIdx >= chunkCount) break;
-
-                                    double seekSec = (cIdx * usableDur) / chunkCount;
-                                    string args = string.Format(
-                                        System.Globalization.CultureInfo.InvariantCulture,
-                                        "-hide_banner -loglevel error -noaccurate_seek -threads 2 -flags2 fast -skip_loop_filter all -ss {0:0.00} -i \"{1}\" -frames:v {2} -an -vf \"scale=540:-2:flags=fast_bilinear\" -pix_fmt yuvj420p -strict -2 -q:v 4 -f mjpeg pipe:1",
-                                        seekSec, videoPath, framesPerChunk);
-
-                                    ProcessStartInfo psi = new ProcessStartInfo
-                                    {
-                                        FileName = ffmpegExe,
-                                        Arguments = args,
-                                        UseShellExecute = false,
-                                        CreateNoWindow = true,
-                                        RedirectStandardOutput = true,
-                                        RedirectStandardError = false
-                                    };
-
-                                    using (Process proc = Process.Start(psi))
-                                    {
-                                        if (proc != null)
-                                        {
-                                            using (MemoryStream ms = new MemoryStream(262144))
-                                            {
-                                                byte[] buf = new byte[32768];
-                                                int read;
-                                                while ((read = proc.StandardOutput.BaseStream.Read(buf, 0, buf.Length)) > 0)
-                                                {
-                                                    if (gen != _streamGeneration)
-                                                    {
-                                                        try { proc.Kill(); } catch { }
-                                                        break;
-                                                    }
-                                                    ms.Write(buf, 0, read);
-                                                }
-                                                try { proc.WaitForExit(1500); } catch { }
-                                                byte[] rawBytes = ms.GetBuffer();
-                                                int rawLen = (int)ms.Length;
-                                                List<byte[]> parsed = ParseConcatenatedJpegs(rawBytes, rawLen);
-                                                chunkResults[cIdx] = parsed;
-                                            }
-                                        }
-                                    }
-
-                                    // Progressive assembly so playback starts immediately at 120fps after the first chunk (~120ms)!
-                                    if (gen == _streamGeneration)
-                                    {
-                                        List<byte[]> progressive = new List<byte[]>(chunkCount * framesPerChunk);
-                                        for (int k = 0; k < chunkCount; k++)
-                                        {
-                                            if (chunkResults[k] != null && chunkResults[k].Count > 0)
-                                            {
-                                                progressive.AddRange(chunkResults[k]);
-                                            }
-                                        }
-                                        if (progressive.Count > 0)
-                                        {
-                                            bool firstSwitch = false;
-                                            lock (_framesLock)
-                                            {
-                                                firstSwitch = (_activeFrameJpegs.Count == 0);
-                                                _activeFrameJpegs = progressive;
-                                            }
-                                            if (firstSwitch)
-                                            {
-                                                Dispatcher.BeginInvoke(new Action(() =>
-                                                {
-                                                    if (gen == _streamGeneration)
-                                                    {
-                                                        _highFpsImage.Visibility = System.Windows.Visibility.Visible;
-                                                        _mediaElement.Visibility = System.Windows.Visibility.Collapsed;
-                                                        _cycleClock.Restart();
-                                                    }
-                                                }));
-                                            }
-                                        }
-                                    }
+                                    extractSingleChunk(cIdx);
                                 }
                             }
                             catch { }
                             finally
                             {
-                                if (Interlocked.Increment(ref completedChunks) == workerCount)
+                                if (Interlocked.Increment(ref completedWorkers) == workerCount)
                                 {
                                     try { allDone.Set(); } catch { }
                                 }
@@ -3223,7 +4482,7 @@ namespace DshGalleryExplorer
                 _zoomLabel.Text = "网格尺寸: " + newSize + "px";
             };
 
-            _videoHoverDebounceTimer = new System.Windows.Forms.Timer { Interval = 85 };
+            _videoHoverDebounceTimer = new System.Windows.Forms.Timer { Interval = 35 };
             _videoHoverDebounceTimer.Tick += (s, e) =>
             {
                 _videoHoverDebounceTimer.Stop();
@@ -3236,7 +4495,19 @@ namespace DshGalleryExplorer
                 {
                     _videoHoverPopup = new VideoHoverPreviewWindow();
                 }
-                _videoHoverPopup.ShowOrUpdatePreview(_pendingHoverVideoPath, _lastHoverScreenPt);
+                Bitmap coverBmp = _grid != null ? _grid.TryGetCachedThumbnail(_pendingHoverVideoPath) : null;
+                _videoHoverPopup.ShowOrUpdatePreview(_pendingHoverVideoPath, _lastHoverScreenPt, coverBmp);
+            };
+            Shown += (s, e) =>
+            {
+                try
+                {
+                    if (_videoHoverPopup == null)
+                    {
+                        _videoHoverPopup = new VideoHoverPreviewWindow();
+                    }
+                }
+                catch { }
             };
             Deactivate += (s, e) => HideVideoHoverPreview();
             FormClosing += (s, e) =>
@@ -4825,7 +6096,8 @@ namespace DshGalleryExplorer
                 {
                     // Immediately switch to the newly hovered video without flicker
                     _videoHoverDebounceTimer.Stop();
-                    _videoHoverPopup.ShowOrUpdatePreview(_pendingHoverVideoPath, cursorScreenPt);
+                    Bitmap coverBmp = _grid != null ? _grid.TryGetCachedThumbnail(_pendingHoverVideoPath) : null;
+                    _videoHoverPopup.ShowOrUpdatePreview(_pendingHoverVideoPath, cursorScreenPt, coverBmp);
                 }
                 else
                 {
