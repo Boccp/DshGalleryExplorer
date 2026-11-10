@@ -119,7 +119,7 @@ try {
 } catch {}
 
 $localCsSha = Get-GitBlobSha "$repoDir\dsh-gallery-explorer.cs"
-$gitStatus = git status --porcelain 2>$null
+$gitStatus = git status --porcelain -- "dsh-gallery-explorer.cs" "dsh_file_tags.py" "artist_purity_engine.py" "generate_folder_cover_icons.py" "README.md" "version.txt" "SyncGalleryToGitHub.ps1" "DownloadGalleryFromGitHub.ps1" 2>$null
 
 if (-not $Force -and $remoteCommitSha) {
     if ($remoteVer -gt $localVer) {
