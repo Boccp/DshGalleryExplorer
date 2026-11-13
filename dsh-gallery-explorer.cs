@@ -271,7 +271,7 @@ namespace DshGalleryExplorer
         private readonly ConcurrentDictionary<string, Bitmap> _thumbCache = new ConcurrentDictionary<string, Bitmap>(StringComparer.OrdinalIgnoreCase);
         private readonly ConcurrentDictionary<string, byte> _inFlight = new ConcurrentDictionary<string, byte>(StringComparer.OrdinalIgnoreCase);
         private int _preloadGeneration = 0;
-        private static readonly string DISK_CACHE_DIR = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), @".dsh\gallery_cache\thumbnails");
+        private static string DISK_CACHE_DIR { get { return AppPaths.ThumbnailCacheDir; } }
 
         private string _hudTitle = "";
         private string _hudSub = "";
@@ -607,6 +607,7 @@ namespace DshGalleryExplorer
         {
             if (_thumbCache.ContainsKey(item.FullPath)) return;
             if (!_inFlight.TryAdd(item.FullPath, 1)) return;
+            Perf.Scope perfScope = Perf.Measure("thumb.item");
             try
             {
                 Bitmap bmp = TryLoadFromDiskCache(item);
@@ -638,7 +639,17 @@ namespace DshGalleryExplorer
             {
                 byte dummy;
                 _inFlight.TryRemove(item.FullPath, out dummy);
+                perfScope.Dispose();
             }
+        }
+
+        /// <summary>当前内存缩略图缓存数量（基准测试用）。</summary>
+        internal int CachedThumbnailCount { get { return _thumbCache.Count; } }
+
+        /// <summary>把整个网格绘制到任意 Graphics（基准测试离屏渲染用，与 OnPaint 完全同一路径）。</summary>
+        internal void RenderForBench(Graphics g)
+        {
+            OnPaint(new PaintEventArgs(g, ClientRectangle));
         }
 
         private static string GetDiskCacheFilePath(EntryItem item)
@@ -657,18 +668,21 @@ namespace DshGalleryExplorer
             catch { return null; }
         }
 
-        private static Bitmap TryLoadFromDiskCache(EntryItem item)
+        internal static Bitmap TryLoadFromDiskCache(EntryItem item)
         {
             try
             {
                 string cacheFile = GetDiskCacheFilePath(item);
                 if (!string.IsNullOrEmpty(cacheFile) && File.Exists(cacheFile))
                 {
-                    byte[] bytes = File.ReadAllBytes(cacheFile);
-                    using (MemoryStream ms = new MemoryStream(bytes))
-                    using (Image img = Image.FromStream(ms, false, false))
+                    using (Perf.Measure("thumb.diskLoad"))
                     {
-                        return new Bitmap(img);
+                        byte[] bytes = File.ReadAllBytes(cacheFile);
+                        using (MemoryStream ms = new MemoryStream(bytes))
+                        using (Image img = Image.FromStream(ms, false, false))
+                        {
+                            return new Bitmap(img);
+                        }
                     }
                 }
             }
@@ -676,13 +690,16 @@ namespace DshGalleryExplorer
             return null;
         }
 
-        private static void SaveToDiskCache(EntryItem item, Bitmap bmp)
+        internal static void SaveToDiskCache(EntryItem item, Bitmap bmp)
         {
             try
             {
                 string cacheFile = GetDiskCacheFilePath(item);
                 if (string.IsNullOrEmpty(cacheFile) || File.Exists(cacheFile)) return;
-                bmp.Save(cacheFile, item.IsFolder ? ImageFormat.Png : ImageFormat.Jpeg);
+                using (Perf.Measure("thumb.diskSave"))
+                {
+                    bmp.Save(cacheFile, item.IsFolder ? ImageFormat.Png : ImageFormat.Jpeg);
+                }
             }
             catch { }
         }
@@ -1450,7 +1467,7 @@ namespace DshGalleryExplorer
             ThreadPool.QueueUserWorkItem(_ => DecodeAndCacheItemSync(item));
         }
 
-        private static Bitmap DecodeThumbnailBitmap(string path, bool isFolder, int targetSize)
+        internal static Bitmap DecodeThumbnailBitmap(string path, bool isFolder, int targetSize)
         {
             try
             {
@@ -1458,7 +1475,13 @@ namespace DshGalleryExplorer
                 string ext = Path.GetExtension(path).ToLowerInvariant();
                 if (!IsSupportedMediaExtension(ext)) return null;
 
-                using (Bitmap src = LoadAnyImageBitmap(path, targetSize))
+                Bitmap srcLoaded;
+                using (Perf.Measure("thumb.decode"))
+                {
+                    srcLoaded = LoadAnyImageBitmap(path, targetSize);
+                }
+                using (Bitmap src = srcLoaded)
+                using (Perf.Measure("thumb.scale"))
                 {
                     if (src == null) return null;
                     int w = src.Width;
@@ -1533,6 +1556,14 @@ namespace DshGalleryExplorer
         }
 
         protected override void OnPaint(PaintEventArgs e)
+        {
+            using (Perf.Measure("grid.paint"))
+            {
+                PaintGrid(e);
+            }
+        }
+
+        private void PaintGrid(PaintEventArgs e)
         {
             Graphics g = e.Graphics;
             g.SmoothingMode = SmoothingMode.AntiAlias;
@@ -2105,7 +2136,11 @@ namespace DshGalleryExplorer
         {
             if (_currentIndex < 0 || _currentIndex >= _imageList.Count) return;
             string p = _imageList[_currentIndex];
-            Bitmap bmp = VirtualGridCanvas.LoadAnyImageBitmap(p, 3840);
+            Bitmap bmp;
+            using (Perf.Measure("viewer.load"))
+            {
+                bmp = VirtualGridCanvas.LoadAnyImageBitmap(p, 3840);
+            }
             Bitmap old = _currentBitmap;
             _currentBitmap = bmp;
             if (old != null) old.Dispose();
@@ -2589,6 +2624,28 @@ namespace DshGalleryExplorer
 
         protected override void OnPaint(PaintEventArgs e)
         {
+            using (Perf.Measure("viewer.paint"))
+            {
+                PaintViewer(e);
+            }
+        }
+
+        /// <summary>基准测试：把看图器画面渲染到任意 Graphics（与 OnPaint 同一路径）。</summary>
+        internal void RenderForBench(Graphics g)
+        {
+            OnPaint(new PaintEventArgs(g, ClientRectangle));
+        }
+
+        /// <summary>基准测试：模拟进入截图模式并把鼠标放在指定位置（触发放大镜/十字线绘制）。</summary>
+        internal void SimulateScreenshotModeForBench(Point mousePt)
+        {
+            _isScreenshotModeActive = true;
+            _cropMode = CropSelectionMode.None;
+            _currentMousePt = mousePt;
+        }
+
+        private void PaintViewer(PaintEventArgs e)
+        {
             Graphics g = e.Graphics;
             g.Clear(BackColor);
             if (_currentBitmap == null) return;
@@ -2933,7 +2990,7 @@ namespace DshGalleryExplorer
 
         private static readonly ConcurrentDictionary<string, List<byte[]>> _memoryReelCache =
             new ConcurrentDictionary<string, List<byte[]>>(StringComparer.OrdinalIgnoreCase);
-        private static readonly string REEL_DISK_CACHE_DIR = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), @".dsh\gallery_cache\video_reels");
+        private static string REEL_DISK_CACHE_DIR { get { return AppPaths.VideoReelCacheDir; } }
         private static readonly string[] FFMPEG_CANDIDATE_PATHS = new[]
         {
             @"D:\_tools\ffmpeg.exe",
@@ -3406,7 +3463,7 @@ namespace DshGalleryExplorer
             catch { }
         }
 
-        private static bool ProbeVideoDurationAndResolutionViaFfmpeg(string ffmpegExe, string videoPath, out double durationSec, out int width, out int height)
+        internal static bool ProbeVideoDurationAndResolutionViaFfmpeg(string ffmpegExe, string videoPath, out double durationSec, out int width, out int height)
         {
             durationSec = 0.0;
             width = 0;
@@ -3586,7 +3643,7 @@ namespace DshGalleryExplorer
             }
         }
 
-        private static string GetReelDiskCachePath(string videoPath)
+        internal static string GetReelDiskCachePath(string videoPath)
         {
             try
             {
@@ -3654,7 +3711,7 @@ namespace DshGalleryExplorer
             catch { }
         }
 
-        private static List<byte[]> ParseConcatenatedJpegs(byte[] raw, int length)
+        internal static List<byte[]> ParseConcatenatedJpegs(byte[] raw, int length)
         {
             List<byte[]> result = new List<byte[]>();
             if (raw == null || length < 4) return result;
@@ -3733,138 +3790,32 @@ namespace DshGalleryExplorer
                     // Stream-extract 36 chunks across the video timeline:
                     // Extract Chunk 0 FIRST without contention so the first 17 frames appear in ~50-80ms,
                     // then extract remaining chunks 1..35 across 3 concurrent background workers!
-                    int chunkCount = TARGET_REEL_CHUNKS;
-                    int framesPerChunk = TARGET_FRAMES_PER_CHUNK;
-                    double usableDur = Math.Max(1.0, durationSec * 0.985);
-                    List<byte[]>[] chunkResults = new List<byte[]>[chunkCount];
-
-                    Action<int> extractSingleChunk = (int cIdx) =>
-                    {
-                        if (gen != _streamGeneration) return;
-                        double seekSec = (cIdx * usableDur) / chunkCount;
-                        string args = string.Format(
-                            System.Globalization.CultureInfo.InvariantCulture,
-                            "-hide_banner -loglevel error -noaccurate_seek -threads 2 -flags2 fast -skip_loop_filter all -ss {0:0.00} -i \"{1}\" -frames:v {2} -an -vf \"scale=540:-2:flags=fast_bilinear\" -pix_fmt yuvj420p -strict -2 -q:v 4 -f mjpeg pipe:1",
-                            seekSec, videoPath, framesPerChunk);
-
-                        ProcessStartInfo psi = new ProcessStartInfo
+                    List<byte[]> finalReel = BuildReel(ffmpegExe, videoPath, durationSec, TARGET_REEL_CHUNKS, TARGET_FRAMES_PER_CHUNK, 3,
+                        () => gen != _streamGeneration,
+                        progressive =>
                         {
-                            FileName = ffmpegExe,
-                            Arguments = args,
-                            UseShellExecute = false,
-                            CreateNoWindow = true,
-                            RedirectStandardOutput = true,
-                            RedirectStandardError = false
-                        };
-
-                        using (Process proc = Process.Start(psi))
-                        {
-                            if (proc != null)
+                            bool firstSwitch = false;
+                            lock (_framesLock)
                             {
-                                using (MemoryStream ms = new MemoryStream(262144))
+                                firstSwitch = (_activeFrameJpegs.Count == 0);
+                                _activeFrameJpegs = progressive;
+                            }
+                            if (firstSwitch)
+                            {
+                                Dispatcher.BeginInvoke(new Action(() =>
                                 {
-                                    byte[] buf = new byte[32768];
-                                    int read;
-                                    while ((read = proc.StandardOutput.BaseStream.Read(buf, 0, buf.Length)) > 0)
+                                    if (gen == _streamGeneration)
                                     {
-                                        if (gen != _streamGeneration)
-                                        {
-                                            try { proc.Kill(); } catch { }
-                                            break;
-                                        }
-                                        ms.Write(buf, 0, read);
+                                        _highFpsImage.Visibility = System.Windows.Visibility.Visible;
+                                        _mediaElement.Visibility = System.Windows.Visibility.Collapsed;
+                                        _cycleClock.Restart();
                                     }
-                                    try { proc.WaitForExit(1500); } catch { }
-                                    byte[] rawBytes = ms.GetBuffer();
-                                    int rawLen = (int)ms.Length;
-                                    List<byte[]> parsed = ParseConcatenatedJpegs(rawBytes, rawLen);
-                                    chunkResults[cIdx] = parsed;
-                                }
-                            }
-                        }
-
-                        if (gen == _streamGeneration)
-                        {
-                            List<byte[]> progressive = new List<byte[]>(chunkCount * framesPerChunk);
-                            for (int k = 0; k < chunkCount; k++)
-                            {
-                                if (chunkResults[k] != null && chunkResults[k].Count > 0)
-                                {
-                                    progressive.AddRange(chunkResults[k]);
-                                }
-                            }
-                            if (progressive.Count > 0)
-                            {
-                                bool firstSwitch = false;
-                                lock (_framesLock)
-                                {
-                                    firstSwitch = (_activeFrameJpegs.Count == 0);
-                                    _activeFrameJpegs = progressive;
-                                }
-                                if (firstSwitch)
-                                {
-                                    Dispatcher.BeginInvoke(new Action(() =>
-                                    {
-                                        if (gen == _streamGeneration)
-                                        {
-                                            _highFpsImage.Visibility = System.Windows.Visibility.Visible;
-                                            _mediaElement.Visibility = System.Windows.Visibility.Collapsed;
-                                            _cycleClock.Restart();
-                                        }
-                                    }));
-                                }
-                            }
-                        }
-                    };
-
-                    // Priority Step 1: Extract Chunk 0 immediately with zero process contention!
-                    extractSingleChunk(0);
-                    if (gen != _streamGeneration) return;
-
-                    // Priority Step 2: Extract remaining Chunks 1..35 across 3 concurrent workers
-                    int nextChunk = 1;
-                    int completedWorkers = 0;
-                    ManualResetEvent allDone = new ManualResetEvent(false);
-                    int workerCount = 3;
-
-                    for (int w = 0; w < workerCount; w++)
-                    {
-                        ThreadPool.QueueUserWorkItem(__ =>
-                        {
-                            try
-                            {
-                                while (true)
-                                {
-                                    if (gen != _streamGeneration) break;
-                                    int cIdx = Interlocked.Increment(ref nextChunk) - 1;
-                                    if (cIdx >= chunkCount) break;
-                                    extractSingleChunk(cIdx);
-                                }
-                            }
-                            catch { }
-                            finally
-                            {
-                                if (Interlocked.Increment(ref completedWorkers) == workerCount)
-                                {
-                                    try { allDone.Set(); } catch { }
-                                }
+                                }));
                             }
                         });
-                    }
 
-                    allDone.WaitOne(20000);
-                    allDone.Close();
-
-                    if (gen == _streamGeneration)
+                    if (finalReel != null && gen == _streamGeneration)
                     {
-                        List<byte[]> finalReel = new List<byte[]>(chunkCount * framesPerChunk);
-                        for (int k = 0; k < chunkCount; k++)
-                        {
-                            if (chunkResults[k] != null && chunkResults[k].Count > 0)
-                            {
-                                finalReel.AddRange(chunkResults[k]);
-                            }
-                        }
                         if (finalReel.Count > 30)
                         {
                             _memoryReelCache[videoPath] = finalReel;
@@ -3878,6 +3829,138 @@ namespace DshGalleryExplorer
                 }
                 catch { }
             });
+        }
+
+        /// <summary>
+        /// 抽取“chunkCount 段 × framesPerChunk 帧”的预览胶片：先无竞争抽取第 0 段（让首帧尽快出现），
+        /// 再用 workerCount 个并发 ffmpeg 进程抽取其余段。
+        /// isCancelled() 为 true 时尽快退出并返回 null；onProgress 在每段完成后收到“按时间顺序拼好的当前全部帧”。
+        /// 第 0 段抛出的异常向调用方传播（与重构前一致）。
+        /// </summary>
+        internal static List<byte[]> BuildReel(string ffmpegExe, string videoPath, double durationSec, int chunkCount, int framesPerChunk, int workerCount,
+            Func<bool> isCancelled, Action<List<byte[]>> onProgress)
+        {
+            double usableDur = Math.Max(1.0, durationSec * 0.985);
+            List<byte[]>[] chunkResults = new List<byte[]>[chunkCount];
+
+            Action<int> extractSingleChunk = (int cIdx) =>
+            {
+                if (isCancelled()) return;
+                double seekSec = (cIdx * usableDur) / chunkCount;
+                List<byte[]> parsed = ExtractReelChunk(ffmpegExe, videoPath, seekSec, framesPerChunk, isCancelled);
+                if (parsed != null) chunkResults[cIdx] = parsed;
+
+                if (!isCancelled())
+                {
+                    List<byte[]> progressive = new List<byte[]>(chunkCount * framesPerChunk);
+                    for (int k = 0; k < chunkCount; k++)
+                    {
+                        if (chunkResults[k] != null && chunkResults[k].Count > 0)
+                        {
+                            progressive.AddRange(chunkResults[k]);
+                        }
+                    }
+                    if (progressive.Count > 0 && onProgress != null)
+                    {
+                        onProgress(progressive);
+                    }
+                }
+            };
+
+            // Priority Step 1: Extract Chunk 0 immediately with zero process contention!
+            extractSingleChunk(0);
+            if (isCancelled()) return null;
+
+            // Priority Step 2: Extract remaining chunks across N concurrent workers
+            int nextChunk = 1;
+            int completedWorkers = 0;
+            ManualResetEvent allDone = new ManualResetEvent(false);
+
+            for (int w = 0; w < workerCount; w++)
+            {
+                ThreadPool.QueueUserWorkItem(__ =>
+                {
+                    try
+                    {
+                        while (true)
+                        {
+                            if (isCancelled()) break;
+                            int cIdx = Interlocked.Increment(ref nextChunk) - 1;
+                            if (cIdx >= chunkCount) break;
+                            extractSingleChunk(cIdx);
+                        }
+                    }
+                    catch { }
+                    finally
+                    {
+                        if (Interlocked.Increment(ref completedWorkers) == workerCount)
+                        {
+                            try { allDone.Set(); } catch { }
+                        }
+                    }
+                });
+            }
+
+            allDone.WaitOne(20000);
+            allDone.Close();
+
+            if (isCancelled()) return null;
+
+            List<byte[]> finalReel = new List<byte[]>(chunkCount * framesPerChunk);
+            for (int k = 0; k < chunkCount; k++)
+            {
+                if (chunkResults[k] != null && chunkResults[k].Count > 0)
+                {
+                    finalReel.AddRange(chunkResults[k]);
+                }
+            }
+            return finalReel;
+        }
+
+        /// <summary>
+        /// 从 seekSec 处用一个 ffmpeg 进程连续抽取 framesPerChunk 帧（540px 宽 MJPEG），返回拆分后的 JPEG 列表。
+        /// 进程启动失败返回 null；isCancelled() 为 true 时立即杀掉进程。
+        /// </summary>
+        internal static List<byte[]> ExtractReelChunk(string ffmpegExe, string videoPath, double seekSec, int framesPerChunk, Func<bool> isCancelled)
+        {
+            string args = string.Format(
+                System.Globalization.CultureInfo.InvariantCulture,
+                "-hide_banner -loglevel error -noaccurate_seek -threads 2 -flags2 fast -skip_loop_filter all -ss {0:0.00} -i \"{1}\" -frames:v {2} -an -vf \"scale=540:-2:flags=fast_bilinear\" -pix_fmt yuvj420p -strict -2 -q:v 4 -f mjpeg pipe:1",
+                seekSec, videoPath, framesPerChunk);
+
+            ProcessStartInfo psi = new ProcessStartInfo
+            {
+                FileName = ffmpegExe,
+                Arguments = args,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = false
+            };
+
+            using (Perf.Measure("reel.chunk"))
+            using (Process proc = Process.Start(psi))
+            {
+                if (proc == null) return null;
+                using (MemoryStream ms = new MemoryStream(262144))
+                {
+                    byte[] buf = new byte[32768];
+                    int read;
+                    while ((read = proc.StandardOutput.BaseStream.Read(buf, 0, buf.Length)) > 0)
+                    {
+                        if (isCancelled())
+                        {
+                            try { proc.Kill(); } catch { }
+                            break;
+                        }
+                        ms.Write(buf, 0, read);
+                    }
+                    try { proc.WaitForExit(1500); } catch { }
+                    byte[] rawBytes = ms.GetBuffer();
+                    int rawLen = (int)ms.Length;
+                    return ParseConcatenatedJpegs(rawBytes, rawLen);
+                }
+            }
         }
 
         private void OnMediaEnded(object sender, System.Windows.RoutedEventArgs e)
@@ -3909,7 +3992,7 @@ namespace DshGalleryExplorer
             }
         }
 
-        private static System.Windows.Media.Imaging.BitmapImage DecodeJpegBytesToBitmapImage(byte[] jpegBytes)
+        internal static System.Windows.Media.Imaging.BitmapImage DecodeJpegBytesToBitmapImage(byte[] jpegBytes)
         {
             try
             {
@@ -3960,7 +4043,11 @@ namespace DshGalleryExplorer
                         byte[] jpg = framesSnapshot[targetIdx];
                         if (jpg != null && jpg.Length > 0)
                         {
-                            System.Windows.Media.Imaging.BitmapImage bmi = DecodeJpegBytesToBitmapImage(jpg);
+                            System.Windows.Media.Imaging.BitmapImage bmi;
+                            using (Perf.Measure("reel.uiDecode"))
+                            {
+                                bmi = DecodeJpegBytesToBitmapImage(jpg);
+                            }
                             if (bmi != null)
                             {
                                 _highFpsImage.Source = bmi;
@@ -4023,10 +4110,10 @@ namespace DshGalleryExplorer
         };
 
         private string _archiveRoot = Directory.Exists(@"V:\") ? @"V:\归档" : (Directory.Exists(@"D:\") ? @"D:\归档" : @"C:\归档");
-        private static readonly string ARCHIVE_CONFIG_PATH = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), @".dsh\gallery_cache\_dsh_archive_root.txt");
-        private static readonly string LEDGER_PATH = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), @".dsh\gallery_cache\_dsh_tags_ledger.json");
-        private static readonly string SHORTCUTS_PATH = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), @".dsh\gallery_cache\_dsh_sidebar_shortcuts.json");
-        private static readonly string FOLDER_SORTS_PATH = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), @".dsh\gallery_cache\_dsh_folder_sorts.json");
+        private static string ARCHIVE_CONFIG_PATH { get { return AppPaths.ArchiveRootConfigPath; } }
+        private static string LEDGER_PATH { get { return AppPaths.LedgerPath; } }
+        private static string SHORTCUTS_PATH { get { return AppPaths.SidebarShortcutsPath; } }
+        private static string FOLDER_SORTS_PATH { get { return AppPaths.FolderSortsPath; } }
 
         public enum SortField { Name, CreatedTime, ModifiedTime, Size, Tag }
 
@@ -5136,13 +5223,18 @@ namespace DshGalleryExplorer
 
         private int CompareEntries(EntryItem a, EntryItem b)
         {
-            if (_sortFoldersFirst && a.IsFolder != b.IsFolder)
+            return CompareEntries(a, b, _sortField, _sortDescending, _sortFoldersFirst);
+        }
+
+        internal static int CompareEntries(EntryItem a, EntryItem b, SortField sortField, bool sortDescending, bool sortFoldersFirst)
+        {
+            if (sortFoldersFirst && a.IsFolder != b.IsFolder)
             {
                 return a.IsFolder ? -1 : 1;
             }
 
             int cmp = 0;
-            switch (_sortField)
+            switch (sortField)
             {
                 case SortField.CreatedTime:
                     cmp = a.CreatedAt.CompareTo(b.CreatedAt);
@@ -5164,7 +5256,7 @@ namespace DshGalleryExplorer
             {
                 cmp = NaturalCompare(a.Name, b.Name);
             }
-            return _sortDescending ? -cmp : cmp;
+            return sortDescending ? -cmp : cmp;
         }
 
         private static int GetPrimaryTagRank(List<string> uids)
@@ -5973,60 +6065,75 @@ namespace DshGalleryExplorer
             }
 
             List<EntryItem> list = new List<EntryItem>();
+            Perf.Scope perfScope = Perf.Measure("dir.enumerateSort");
             try
             {
-                DirectoryInfo di = new DirectoryInfo(_currentDirectory);
-                bool needStat = (_sortField == SortField.CreatedTime || _sortField == SortField.ModifiedTime || _sortField == SortField.Size);
-                FileSystemInfo[] entries = di.GetFileSystemInfos();
-
-                foreach (FileSystemInfo fsi in entries)
-                {
-                    string name = fsi.Name;
-                    if (name.StartsWith(".") || name == "_标签索引") continue;
-                    bool isDir = (fsi.Attributes & FileAttributes.Directory) != 0;
-
-                    if (isDir)
-                    {
-                        if ((fsi.Attributes & FileAttributes.Hidden) != 0 && !string.Equals(fsi.FullName, _archiveRoot, StringComparison.OrdinalIgnoreCase)) continue;
-                        list.Add(new EntryItem
-                        {
-                            FullPath = fsi.FullName,
-                            Name = name,
-                            IsFolder = true,
-                            CreatedAt = needStat ? fsi.CreationTimeUtc : DateTime.MinValue,
-                            ModifiedAt = needStat ? fsi.LastWriteTimeUtc : DateTime.MinValue,
-                            TagUids = GetTagsForPath(fsi.FullName),
-                            CoverImagePath = null
-                        });
-                    }
-                    else
-                    {
-                        if (string.Equals(name, "desktop.ini", StringComparison.OrdinalIgnoreCase)) continue;
-                        if (name.StartsWith("_dsh_") || name.StartsWith("_library_")) continue;
-                        FileInfo fi = fsi as FileInfo;
-                        string ext = Path.GetExtension(name).ToLowerInvariant();
-                        bool isMedia = Array.IndexOf(IMAGE_EXTS, ext) >= 0 || VirtualGridCanvas.IsVideoExtension(ext);
-                        list.Add(new EntryItem
-                        {
-                            FullPath = fsi.FullName,
-                            Name = name,
-                            IsFolder = false,
-                            SizeBytes = (needStat && fi != null) ? fi.Length : 0L,
-                            CreatedAt = needStat ? fsi.CreationTimeUtc : DateTime.MinValue,
-                            ModifiedAt = needStat ? fsi.LastWriteTimeUtc : DateTime.MinValue,
-                            TagUids = GetTagsForPath(fsi.FullName),
-                            CoverImagePath = isMedia ? fsi.FullName : null
-                        });
-                    }
-                }
-                list.Sort(CompareEntries);
+                FillDirectoryEntries(list, _currentDirectory, _archiveRoot, _sortField, _sortDescending, _sortFoldersFirst, GetTagsForPath);
             }
             catch (Exception ex)
             {
                 _statusLabel.Text = "读取目录出错: " + ex.Message;
             }
+            perfScope.Dispose();
 
             _grid.SetItems(list, restoreScrollOffset, restoreSelectedPath);
+        }
+
+        /// <summary>
+        /// 枚举目录 → 过滤隐藏/系统/缓存文件 → 匹配账本标签 → 排序，结果追加到 list。
+        /// 静态纯函数，供 RefreshCurrentDirectory 与 --bench 共用；异常向调用方抛出（list 保留已填充部分）。
+        /// </summary>
+        internal static void FillDirectoryEntries(List<EntryItem> list, string directory, string archiveRoot,
+            SortField sortField, bool sortDescending, bool sortFoldersFirst, Func<string, List<string>> tagLookup)
+        {
+            DirectoryInfo di = new DirectoryInfo(directory);
+            bool needStat = (sortField == SortField.CreatedTime || sortField == SortField.ModifiedTime || sortField == SortField.Size);
+            FileSystemInfo[] entries = di.GetFileSystemInfos();
+
+            foreach (FileSystemInfo fsi in entries)
+            {
+                string name = fsi.Name;
+                if (name.StartsWith(".") || name == "_标签索引") continue;
+                bool isDir = (fsi.Attributes & FileAttributes.Directory) != 0;
+
+                if (isDir)
+                {
+                    if ((fsi.Attributes & FileAttributes.Hidden) != 0 && !string.Equals(fsi.FullName, archiveRoot, StringComparison.OrdinalIgnoreCase)) continue;
+                    list.Add(new EntryItem
+                    {
+                        FullPath = fsi.FullName,
+                        Name = name,
+                        IsFolder = true,
+                        CreatedAt = needStat ? fsi.CreationTimeUtc : DateTime.MinValue,
+                        ModifiedAt = needStat ? fsi.LastWriteTimeUtc : DateTime.MinValue,
+                        TagUids = tagLookup(fsi.FullName),
+                        CoverImagePath = null
+                    });
+                }
+                else
+                {
+                    if (string.Equals(name, "desktop.ini", StringComparison.OrdinalIgnoreCase)) continue;
+                    if (name.StartsWith("_dsh_") || name.StartsWith("_library_")) continue;
+                    FileInfo fi = fsi as FileInfo;
+                    string ext = Path.GetExtension(name).ToLowerInvariant();
+                    bool isMedia = Array.IndexOf(IMAGE_EXTS, ext) >= 0 || VirtualGridCanvas.IsVideoExtension(ext);
+                    list.Add(new EntryItem
+                    {
+                        FullPath = fsi.FullName,
+                        Name = name,
+                        IsFolder = false,
+                        SizeBytes = (needStat && fi != null) ? fi.Length : 0L,
+                        CreatedAt = needStat ? fsi.CreationTimeUtc : DateTime.MinValue,
+                        ModifiedAt = needStat ? fsi.LastWriteTimeUtc : DateTime.MinValue,
+                        TagUids = tagLookup(fsi.FullName),
+                        CoverImagePath = isMedia ? fsi.FullName : null
+                    });
+                }
+            }
+            using (Perf.Measure("dir.sort"))
+            {
+                list.Sort((a, b) => CompareEntries(a, b, sortField, sortDescending, sortFoldersFirst));
+            }
         }
 
         public static string FindFirstImageInFolder(string folderPath, int depth = 0)
@@ -6537,7 +6644,7 @@ namespace DshGalleryExplorer
         }
 
         private static volatile bool _savingLedger = false;
-        private static readonly string TAG_INDEX_DIR = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), @".dsh\gallery_cache\tags_index");
+        private static string TAG_INDEX_DIR { get { return AppPaths.TagIndexDir; } }
 
         private void SaveLedgerToDisk()
         {
@@ -6760,7 +6867,7 @@ namespace DshGalleryExplorer
             string dirB = Directory.Exists(@"F:\DeepSeek H") ? @"F:\DeepSeek H" : Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
 
             string backup = null;
-            string sortPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), @".dsh\gallery_cache\_dsh_folder_sorts.json");
+            string sortPath = AppPaths.FolderSortsPath;
             if (File.Exists(sortPath)) backup = File.ReadAllText(sortPath, Encoding.UTF8);
 
             try
@@ -6806,6 +6913,12 @@ namespace DshGalleryExplorer
                 return RunSortSelfTest();
             }
 
+            if (args != null && args.Length > 0 && string.Equals(args[0], "--bench", StringComparison.OrdinalIgnoreCase))
+            {
+                return BenchRunner.Run(args);
+            }
+
+            Log.Info("DSH Gallery Explorer 启动，参数: " + string.Join(" ", args ?? new string[0]));
             try { timeBeginPeriod(1); } catch { }
             try
             {
@@ -6818,6 +6931,8 @@ namespace DshGalleryExplorer
             finally
             {
                 try { timeEndPeriod(1); } catch { }
+                Log.Info("退出，本次运行性能汇总：" + Environment.NewLine + Perf.Report());
+                Log.Flush(1500);
             }
         }
     }

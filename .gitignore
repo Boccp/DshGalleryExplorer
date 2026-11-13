@@ -2,3 +2,6 @@
 *.old.exe
 *.old
 
+out/
+bench_cache/
+*.pdb
