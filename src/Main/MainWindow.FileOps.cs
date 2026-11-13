@@ -67,7 +67,7 @@ namespace DshGalleryExplorer
                 OnItemsDroppedIntoFolder(srcList, _currentDirectory, !_clipboardIsCut);
                 _clipboardIsCut = false;
             }
-            catch { }
+            catch (Exception ex) { Log.Warn(ex, "剪贴板粘贴失败"); }
         }
 
         private void OnItemsDroppedIntoFolder(List<string> sourcePaths, string targetFolder, bool isCopy)
@@ -207,7 +207,7 @@ namespace DshGalleryExplorer
                         if (Directory.Exists(it.FullPath)) Directory.Delete(it.FullPath, true);
                         else if (File.Exists(it.FullPath)) File.Delete(it.FullPath);
                     }
-                    catch { }
+                    catch (Exception ex) { Log.Warn(ex, "删除项目失败: " + it.FullPath); }
                 }
                 SaveLedgerToDisk();
             });
@@ -238,7 +238,7 @@ namespace DshGalleryExplorer
                     try { File.SetAttributes(path, FileAttributes.Normal); } catch { }
                 }
             }
-            catch { }
+            catch (Exception ex) { Log.Debug(ex, "清理只读属性: " + path); }
         }
 
         private void MoveFileOrDirectoryCrossVolume(string src, string dest, List<string> uids)
@@ -299,7 +299,7 @@ namespace DshGalleryExplorer
                 if (uids != null && uids.Count > 0) WriteAdsUids(dest, uids);
                 SaveLedgerToDisk();
             }
-            catch { }
+            catch (Exception ex) { Log.Warn(ex, "跨卷移动失败: " + src + " -> " + dest); }
         }
 
         private void CopyDirectoryRecursive(string srcDir, string destDir)

@@ -127,7 +127,7 @@ namespace DshGalleryExplorer
                     NavigateTo(parent.FullName, true, savedParentScroll, childWeJustLeft);
                 }
             }
-            catch { }
+            catch (Exception ex) { Log.Warn(ex, "返回上级目录失败: " + _currentDirectory); }
         }
 
         public void RefreshCurrentDirectory(int restoreScrollOffset = 0, string restoreSelectedPath = null)
@@ -253,7 +253,7 @@ namespace DshGalleryExplorer
                     if (subImg != null) return subImg;
                 }
             }
-            catch { }
+            catch (Exception ex) { Log.Debug(ex, "查找文件夹封面: " + folderPath); }
             return null;
         }
     }

@@ -263,7 +263,7 @@ namespace DshGalleryExplorer
                     }
                 }
             }
-            catch { }
+            catch (Exception ex) { Log.Warn(ex, "加载标签账本失败: " + LEDGER_PATH); }
         }
 
         private static volatile bool _savingLedger = false;
@@ -344,9 +344,9 @@ namespace DshGalleryExplorer
                         File.WriteAllText(Path.Combine(TAG_INDEX_DIR, t.Name + ".json"), csb.ToString(), Encoding.UTF8);
                     }
                 }
-                catch { }
+                catch (Exception ex) { Log.Warn(ex, "同步标签索引目录失败: " + TAG_INDEX_DIR); }
             }
-            catch { }
+            catch (Exception ex) { Log.Warn(ex, "保存标签账本失败: " + LEDGER_PATH); }
             finally
             {
                 Thread.Sleep(80);
@@ -385,7 +385,7 @@ namespace DshGalleryExplorer
                 };
                 _ledgerWatcher.EnableRaisingEvents = true;
             }
-            catch { }
+            catch (Exception ex) { Log.Debug(ex, "启动标签账本监听器: " + LEDGER_PATH); }
         }
     }
 }

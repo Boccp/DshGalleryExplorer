@@ -20,20 +20,9 @@ namespace DshGalleryExplorer
 {
     internal sealed partial class MainWindow
     {
-        private static readonly string[] SCREENBOX_CANDIDATE_PATHS = new[]
-        {
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), @"Programs\ScreenboxLite\ScreenboxLite.exe"),
-            @"C:\Users\Administrator\AppData\Local\Programs\ScreenboxLite\ScreenboxLite.exe",
-            @"F:\QQ\ScreenboxLite_Release\ScreenboxLite.exe"
-        };
-
         private static string ResolveScreenboxLitePath()
         {
-            foreach (string p in SCREENBOX_CANDIDATE_PATHS)
-            {
-                if (File.Exists(p)) return p;
-            }
-            return null;
+            return AppPaths.ResolveScreenboxLitePath();
         }
 
         private void OnItemOpened(EntryItem item)
@@ -88,7 +77,7 @@ namespace DshGalleryExplorer
                             Process.Start(new ProcessStartInfo(item.FullPath) { UseShellExecute = true });
                         }
                     }
-                    catch { }
+                    catch (Exception ex) { Log.Warn(ex, "启动视频播放器失败: " + item.FullPath); }
                 }
                 else
                 {
@@ -96,7 +85,7 @@ namespace DshGalleryExplorer
                     {
                         Process.Start(new ProcessStartInfo(item.FullPath) { UseShellExecute = true });
                     }
-                    catch { }
+                    catch (Exception ex) { Log.Warn(ex, "打开文件失败: " + item.FullPath); }
                 }
             }
         }

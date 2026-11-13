@@ -33,7 +33,7 @@ namespace DshGalleryExplorer
                     }
                 }
             }
-            catch { }
+            catch (Exception ex) { Log.Debug(ex, "读取归档库配置: " + ARCHIVE_CONFIG_PATH); }
         }
 
         private void SaveArchiveRootToDisk()
@@ -44,7 +44,7 @@ namespace DshGalleryExplorer
                 if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir)) Directory.CreateDirectory(dir);
                 File.WriteAllText(ARCHIVE_CONFIG_PATH, _archiveRoot, new UTF8Encoding(false));
             }
-            catch { }
+            catch (Exception ex) { Log.Warn(ex, "保存归档库配置失败: " + ARCHIVE_CONFIG_PATH); }
         }
 
         private void UpdateArchiveRootUI()

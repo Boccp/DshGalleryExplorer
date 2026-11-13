@@ -83,7 +83,7 @@ namespace DshGalleryExplorer
                     if (!Directory.Exists(_saveFolderPath)) Directory.CreateDirectory(_saveFolderPath);
                     Process.Start("explorer.exe", _saveFolderPath);
                 }
-                catch { }
+                catch (Exception ex) { Log.Warn(ex, "打开截图保存目录失败"); }
                 Focus();
             };
 
@@ -167,7 +167,7 @@ namespace DshGalleryExplorer
                     }
                 }
             }
-            catch { }
+            catch (Exception ex) { Log.Debug(ex, "读取看图器截图配置"); }
         }
 
         private void SaveScreenshotSettings()
@@ -210,7 +210,7 @@ namespace DshGalleryExplorer
                 }
                 File.WriteAllLines(_settingsFilePath, outLines.ToArray());
             }
-            catch { }
+            catch (Exception ex) { Log.Debug(ex, "读取看图器截图配置"); }
         }
 
         private static float ClampF(float val, float min, float max)
@@ -520,7 +520,8 @@ namespace DshGalleryExplorer
             {
                 if (!string.IsNullOrEmpty(_savedPreviewFullPath) && File.Exists(_savedPreviewFullPath))
                 {
-                    try { Process.Start("explorer.exe", "/select,\"" + _savedPreviewFullPath + "\""); } catch { }
+                    try { Process.Start("explorer.exe", "/select,\"" + _savedPreviewFullPath + "\""); }
+                    catch (Exception ex) { Log.Warn(ex, "资源管理器定位截图失败"); }
                 }
                 return;
             }

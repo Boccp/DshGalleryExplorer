@@ -20,7 +20,7 @@ namespace DshGalleryExplorer
 {
     internal sealed partial class MainWindow : Form
     {
-        private string _archiveRoot = Directory.Exists(@"V:\") ? @"V:\归档" : (Directory.Exists(@"D:\") ? @"D:\归档" : @"C:\归档");
+        private string _archiveRoot = AppPaths.ResolveDefaultArchiveRoot();
         private static string ARCHIVE_CONFIG_PATH { get { return AppPaths.ArchiveRootConfigPath; } }
         private static string LEDGER_PATH { get { return AppPaths.LedgerPath; } }
         private static string SHORTCUTS_PATH { get { return AppPaths.SidebarShortcutsPath; } }
@@ -118,7 +118,7 @@ namespace DshGalleryExplorer
                 string dshExe = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), @"Programs\DeepSeek Harness\DeepSeek Harness.exe");
                 if (File.Exists(dshExe)) Icon = Icon.ExtractAssociatedIcon(dshExe);
             }
-            catch { }
+            catch (Exception ex) { Log.Debug(ex, "提取窗口图标"); }
 
             LoadLedgerFromDisk();
             LoadFolderSortsFromDisk();
@@ -129,13 +129,7 @@ namespace DshGalleryExplorer
             UpdateArchiveRootUI();
             SetupLedgerWatcher();
 
-            string startDir = !string.IsNullOrEmpty(initialPath) && Directory.Exists(initialPath)
-                ? initialPath
-                : (Directory.Exists(@"F:\Openclow\画师素材库")
-                    ? @"F:\Openclow\画师素材库"
-                    : (Directory.Exists(@"F:\")
-                        ? @"F:\"
-                        : (Directory.Exists(@"D:\") ? @"D:\" : Environment.GetFolderPath(Environment.SpecialFolder.Desktop))));
+            string startDir = AppPaths.ResolveDefaultStartDirectory(initialPath);
             NavigateTo(startDir, false);
         }
 

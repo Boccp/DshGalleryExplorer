@@ -55,13 +55,28 @@ namespace DshGalleryExplorer
                 return BenchRunner.Run(args);
             }
 
+            bool verbose = false;
+            string initPath = null;
+            if (args != null)
+            {
+                for (int i = 0; i < args.Length; i++)
+                {
+                    if (string.Equals(args[i], "--verbose", StringComparison.OrdinalIgnoreCase)) verbose = true;
+                    else if (initPath == null) initPath = args[i];
+                }
+            }
+            string cfgLog = AppPaths.GetConfig("LogLevel");
+            if (!string.IsNullOrEmpty(cfgLog) && string.Equals(cfgLog.Trim(), "Debug", StringComparison.OrdinalIgnoreCase))
+            {
+                verbose = true;
+            }
+            Log.Init(AppPaths.LogDir, verbose);
             Log.Info("DSH Gallery Explorer 启动，参数: " + string.Join(" ", args ?? new string[0]));
             try { timeBeginPeriod(1); } catch { }
             try
             {
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
-                string initPath = args != null && args.Length > 0 ? args[0] : null;
                 Application.Run(new MainWindow(initPath));
                 return 0;
             }

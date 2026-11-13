@@ -61,7 +61,7 @@ namespace DshGalleryExplorer
                     }
                 }
             }
-            catch { }
+            catch (Exception ex) { Log.Debug(ex, "读取左侧快捷栏配置: " + SHORTCUTS_PATH); }
 
             if (_customShortcuts.Count == 0)
             {
@@ -84,7 +84,7 @@ namespace DshGalleryExplorer
                 }
                 File.WriteAllLines(SHORTCUTS_PATH, lines.ToArray(), Encoding.UTF8);
             }
-            catch { }
+            catch (Exception ex) { Log.Warn(ex, "保存左侧快捷栏配置失败: " + SHORTCUTS_PATH); }
         }
 
         private void RebuildSidebarItems()

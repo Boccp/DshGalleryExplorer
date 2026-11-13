@@ -58,8 +58,10 @@ namespace DshGalleryExplorer
         private int _itemDragDownIndex = -1;
         private bool _deferSingleSelectOnMouseUp = false;
 
-        // Persistent memory + disk thumbnail cache + eager preloader
+        // Persistent memory + disk thumbnail cache + per-tileSize pre-scaled 32bppPArgb blit cache
         private readonly ConcurrentDictionary<string, Bitmap> _thumbCache = new ConcurrentDictionary<string, Bitmap>(StringComparer.OrdinalIgnoreCase);
+        private readonly ConcurrentDictionary<string, Bitmap> _scaledThumbCache = new ConcurrentDictionary<string, Bitmap>(StringComparer.OrdinalIgnoreCase);
+        private int _scaledThumbSize = 0;
         private readonly ConcurrentDictionary<string, byte> _inFlight = new ConcurrentDictionary<string, byte>(StringComparer.OrdinalIgnoreCase);
         private int _preloadGeneration = 0;
         private static string DISK_CACHE_DIR { get { return AppPaths.ThumbnailCacheDir; } }
@@ -93,6 +95,7 @@ namespace DshGalleryExplorer
                 if (_tileSize != clamped)
                 {
                     _tileSize = clamped;
+                    InvalidateTileSurfaceCaches();
                     RecalculateLayout();
                     Invalidate();
                     if (TileSizeChanged != null) TileSizeChanged(_tileSize);
@@ -138,7 +141,8 @@ namespace DshGalleryExplorer
             BackColor = Color.FromArgb(18, 20, 26);
             ForeColor = Color.FromArgb(235, 238, 245);
 
-            try { if (!Directory.Exists(DISK_CACHE_DIR)) Directory.CreateDirectory(DISK_CACHE_DIR); } catch { }
+            try { if (!Directory.Exists(DISK_CACHE_DIR)) Directory.CreateDirectory(DISK_CACHE_DIR); }
+            catch (Exception ex) { Log.Warn(ex, "创建缩略图缓存目录失败"); }
 
             _hudTimer = new System.Windows.Forms.Timer();
             _hudTimer.Interval = 50;
@@ -356,6 +360,20 @@ namespace DshGalleryExplorer
         {
             base.OnResize(e);
             RecalculateLayout();
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                Interlocked.Increment(ref _preloadGeneration);
+                if (_hudTimer != null) { _hudTimer.Stop(); _hudTimer.Dispose(); _hudTimer = null; }
+                if (_autoScrollTimer != null) { _autoScrollTimer.Stop(); _autoScrollTimer.Dispose(); _autoScrollTimer = null; }
+                if (_thumbInvalidateTimer != null) { _thumbInvalidateTimer.Stop(); _thumbInvalidateTimer.Dispose(); _thumbInvalidateTimer = null; }
+                ClearThumbnailCache();
+                DisposePaintResources();
+            }
+            base.Dispose(disposing);
         }
     }
 }

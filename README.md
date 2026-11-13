@@ -1,57 +1,67 @@
-# DSH Gallery Explorer (DSH 画师素材库与归档文件管理器 / 快捷分色标记工具)
+# DSH Gallery Explorer v2 (DSH 画师素材库与归档文件管理器)
 
-一款专为高分辨率画师图集、漫画单行本管理与 AI Agent 协同任务调度打造的 **4K 原生超清虚拟网格文件管理器**。采用纯原生 C# WinForms + GDI+ 双缓冲虚拟化架构（单文件零外部依赖编译），并附带完整的 Python 侧 NTFS 数据流标记联动 SDK 与图库纯净度治理引擎。
-
----
-
-## 核心特性
-
-### 1. 4K 高分屏原生超清虚拟网格（60fps 零卡顿）
-- **Per-Monitor V2 DPI 感知**：原生适配 2K/4K 高分屏缩放，字体、边框与缩略图边缘锐利清晰。
-- **双级缩略图预取与集中式缓存**：内存 + 磁盘双层缓存（统一存放在 `%USERPROFILE%\.dsh\gallery_cache\thumbnails`，**绝不在画师素材文件夹内产生任何缓存文件、图标或 `desktop.ini` 污染**），支持视口上下 2000px 后台多线程预加载，滑动如丝般顺滑。
-- **文件夹满幅封面 + 识别角标**：自动取文件夹内首张作品作为满幅封面，并在顶部绘制深金文件夹折耳与右下角半透明文件夹徽章，与单张散图一目了然区分。
-
-### 2. 零延迟四色快捷键标记（`Ctrl + Q / W / E / R`）与 Agent 实时账本同步
-- **`Ctrl + Q + 左键`**：切换 **🔴 红** 标记（`#E81123`）
-- **`Ctrl + W + 左键`**：切换 **🟠 橙** 标记（`#F7630C`）
-- **`Ctrl + E + 左键`**：切换 **🟡 黄** 标记（`#FFB900`）
-- **`Ctrl + R + 左键`**：切换 **🟢 绿** 标记（`#107C10`）
-- **双通道无损存储**：
-  1. 写入 NTFS Alternate Data Stream（`:files` 数据流），**绝不篡改原始文件名或文件夹名**；
-  2. 毫秒级同步更新集中账本 `_dsh_tags_ledger.json` 与分色索引目录 `tags_index/{红,橙,黄,绿,全部标记}.{txt,json}`，供 AI Agent 零延迟读取任务队列并在完成后自动销项。
-
-### 3. 一键归档与原路复原（`Ctrl + T`）
-- **`Ctrl + T + 左键`**（或选中后按 `Ctrl + T`）：将文件/文件夹一键移入归档库（`V:\归档`），若已在归档库中则自动原路复原回素材库。
-
-### 4. 完整还原 Windows 资源管理器交互体验
-- **导航与位置记忆**：进入子文件夹再后退（鼠标侧键 `XButton1`、`Backspace`、`Alt + Left`）时，精准恢复进入前的滚动条高度与选中项，绝不跳回页首。
-- **长按左键橡皮筋框选 & 跨软件文件拖拽**：在空白处按住左键拉框多选；在已选项目上按住左键拖动即可发起原生 `CF_HDROP` 文件拖拽。
-- **多维排序**：支持按名称（Win32 `StrCmpLogicalW` 自然数字排序）、修改时间、大小、标记颜色正序/倒序排列。
+一款专为高分辨率画师图集、漫画单行本管理、视频素材筛选与 AI Agent 协同任务调度打造的 **4K 原生超清虚拟网格文件管理器**。
+采用纯原生 C# WinForms + GDI+ / WIC / WPF 混合硬件加速架构，零第三方 NuGet 依赖，使用 Windows 自带 `csc.exe` **0.3 秒完成编译**。
 
 ---
 
-## 仓库文件清单
+## v2.0 核心特性与实测性能突破
 
-| 文件名 | 说明 |
+完整架构说明见 [docs/architecture.md](docs/architecture.md)，实测基准数据见 [docs/perf-baseline.md](docs/perf-baseline.md)。
+
+### 1. 4K 高分屏超清虚拟网格与 WIC 多核无锁缩略图引擎
+- **Per-Monitor V2 DPI 原生适配**：适配 2K/4K 高分屏缩放，字体、圆角卡片与缩略图边缘锐利清晰。
+- **WIC 原生无锁并发解码**：采用 Windows Imaging Component 文件头尺寸探测 + JPEG IDCT 解码期硬件降采样 + 多核定点双线性缩放，202 项冷启动缩略图加载从 **12.5 秒降至 0.58 秒（提速 21 倍）**，磁盘缓存热加载仅需 **54 ms（3750+ 项/秒）**。
+- **不透明卡片模板与 1:1 极速贴图**：预渲染 `Format32bppRgb` 卡片与四色外环模板，1080p 全缩放档位稳定 **95–126 fps**，4K (`3840×2160`) 视口稳定 **39–47 fps（p50 达 58 fps）**，相比 v1 提速 **8–12 倍**。
+- **素材库 100% 零污染**：缩略图、视频胶片、标签账本、排序记忆与日志全部集中在 `%USERPROFILE%\.dsh\gallery_cache`，绝不在画师素材文件夹内产生任何缓存或 `desktop.ini` 文件。
+
+### 2. 内置无损原图看图器与 `~` 键极速框选截图
+- **视口级缓存 + 局部 `LockBits` 放大镜**：34.8 MB 超清大图在 `~` 键框选截图模式下移动鼠标重绘仅需 **1.4 ms/帧（~700 fps）**，彻底消除旧版每帧 `2,000 ms` 的全图重采样卡顿；确定裁剪时直接从全分辨率原图无损导出。
+- 支持滚轮缩放、拖拽平移、左右翻页、右键多级撤回选区、双击自动复制到剪贴板并落盘保存。
+
+### 3. 120fps 视频悬停预览与 ScreenboxLite 无缝接力
+- 鼠标悬停视频自动弹出穿透式预览窗：短视频走原生硬件播放，中长视频自动切换 **17 帧极速首包 + 11×54 帧并发胶片流**，后台预解码冻结 `BitmapSource`，UI 线程 **0.00 ms 解码开销**。
+- 双击视频直接唤起 `ScreenboxLite` v2（原生 `libmpv` 引擎）进入逐帧精准截图工作流。
+
+### 4. 零延迟四色快捷键标记（`Ctrl + Q / W / E / R`）与一键归档（`Ctrl + T`）
+- `Ctrl + Q / W / E / R` 切换 **红 / 橙 / 黄 / 绿** 四色标记，同时写入 NTFS `:files` 数据流（不改文件名）并实时同步 `_dsh_tags_ledger.json` 与 `tags_index\`，与 `python/dsh_file_tags.py` 无缝互通。
+- `Ctrl + T` 一键在素材库与归档库（默认 `V:\归档`，可自定义）之间按原盘符路径双向移入/复原。
+- **零分配自然序比较器**：8,398 项大目录自然数字排序纯算法耗时从 **406 ms 降至 ~6 ms（提速 65 倍）**，并支持按文件夹独立记忆排序方式与进入/后退滚动位置记忆。
+
+---
+
+## 目录结构
+
+| 路径 | 说明 |
 | :--- | :--- |
-| `dsh-gallery-explorer.cs` | 管理器完整 C# 单文件源码（虚拟网格画布、DPI 自适应、NTFS ADS 读写、集中式缩略图缓存、导航栈记忆） |
-| `dsh-gallery-explorer.exe` | 已编译的 64 位原生可执行程序 |
-| `dsh_file_tags.py` | Python 侧 NTFS `:files` 数据流读写、集中账本同步与 AI Agent 任务销项 SDK / CLI |
-| `artist_purity_engine.py` | 画师图库纯净度治理引擎（语种白名单优选 `中>英>日`、dHash 感知哈希去重、跨页双页漫画自动切分、SQLite 台账） |
-| `generate_folder_cover_icons.py` | 文件夹封面渲染辅助工具 |
-| `SyncGalleryToGitHub.ps1` | 一键重新编译并同步推送到 GitHub 仓库与 Release 的自动化脚本 |
+| `src/` | 模块化 C# 源码（30 个文件：Core / Diagnostics / Models / Main / Grid / Viewer / Video / Dialogs / SelfTest / Bench） |
+| `build.ps1` | 一键编译到 `out\dsh-gallery-explorer.exe` 并支持 `-Test` 运行自动化自检 |
+| `python/` | Python 侧 NTFS `:files` 标签同步 SDK (`dsh_file_tags.py`) 与画师图库纯净度治理引擎 (`artist_purity_engine.py`) |
+| `docs/` | 架构设计文档 (`architecture.md`)、性能基线对比 (`perf-baseline.md`) 与自动基准测试报告 (`bench/`) |
 
 ---
 
-## 零依赖编译命令（PowerShell）
+## 编译、自检与性能基准命令
 
-无需安装 Visual Studio，直接使用 Windows 内置 `.NET Framework 4.x` 的 `csc.exe` 即可在 1 秒内完成编译：
+无需安装 Visual Studio 或额外 SDK，直接在 PowerShell 中运行：
 
 ```powershell
-$csc = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
-& $csc /nologo /target:winexe /optimize+ /out:"dsh-gallery-explorer.exe" `
-    /r:System.dll /r:System.Core.dll /r:System.Drawing.dll /r:System.Windows.Forms.dll `
-    "dsh-gallery-explorer.cs"
+# 1. 编译并执行自动化排序/配置隔离自检
+powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1 -Test
+
+# 2. 运行全链路无人值守性能基准测试（只读扫描测试目录，缓存完全隔离）
+Start-Process -FilePath .\out\dsh-gallery-explorer.exe -ArgumentList '--bench "F:\QQ" "F:\Openclow\画师素材库\Pin"' -Wait -NoNewWindow
+```
+
+### 可选配置文件 (`%USERPROFILE%\.dsh\gallery_cache\config.ini`)
+
+```ini
+# 所有项均为可选，未配置时自动探测本机路径
+DefaultStartDir=F:\Openclow\画师素材库
+DefaultArchiveDir=V:\归档
+ScreenboxPath=C:\Users\Administrator\AppData\Local\Programs\ScreenboxLite\ScreenboxLite.exe
+FfmpegPath=D:\_tools\ffmpeg.exe
+LogLevel=Info
 ```
 
 ## 开源协议

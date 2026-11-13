@@ -1,7 +1,9 @@
 ﻿.github_token
+.last_synced_commit
 *.old.exe
 *.old
-
+*.exe
+*.pdb
+*.zip
 out/
 bench_cache/
-*.pdb

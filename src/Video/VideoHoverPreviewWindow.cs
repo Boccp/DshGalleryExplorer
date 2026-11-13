@@ -1,19 +1,13 @@
-// 视频悬停预览窗口（WPF）：界面、显示/隐藏、定位、MediaElement 与高帧率胶片播放。
+// 视频悬停预览窗口（WPF）：界面、显示/隐藏、定位、MediaElement 与高帧率胶片播放（UI 线程零解码直呈预解码冻结帧）。
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.Collections.Specialized;
 using System.Diagnostics;
 using System.Drawing;
-using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.IO;
 using System.Runtime.InteropServices;
-using System.Security.Cryptography;
-using System.Text;
-using System.Text.RegularExpressions;
 using System.Threading;
-using System.Threading.Tasks;
 using System.Windows.Forms;
 
 namespace DshGalleryExplorer
@@ -36,10 +30,11 @@ namespace DshGalleryExplorer
         private bool _renderingHooked = false;
         private readonly Stopwatch _cycleClock = new Stopwatch();
 
-        // High-FPS (~120fps / 600 frames per 5s) frame stream state
+        // High-FPS (~120fps / ~611 frames per 5s) pre-decoded frozen BitmapSource stream state
         private int _streamGeneration = 0;
         private readonly object _framesLock = new object();
-        private List<byte[]> _activeFrameJpegs = new List<byte[]>();
+        private List<System.Windows.Media.Imaging.BitmapSource> _activeDecodedFrames =
+            new List<System.Windows.Media.Imaging.BitmapSource>();
         private int _lastRenderedFrameIdx = -1;
         private int _framesPresentedInSec = 0;
         private int _measuredFps = 120;
@@ -49,8 +44,6 @@ namespace DshGalleryExplorer
         private double _cachedDpiY = 0.0;
 
         private const double TARGET_PREVIEW_CYCLE_SECONDS = 5.0;
-        private const int TARGET_REEL_CHUNKS = 36;
-        private const int TARGET_FRAMES_PER_CHUNK = 17; // 36 * 17 = 612 distinct frames across 5s (~122.4 fps)
         private const int BASE_WIDTH = 440;
         private const int BASE_VIDEO_HEIGHT = 248;
         private const int HEADER_FOOTER_HEIGHT = 44;
@@ -63,7 +56,11 @@ namespace DshGalleryExplorer
 
         public VideoHoverPreviewWindow()
         {
-            try { if (!Directory.Exists(REEL_DISK_CACHE_DIR)) Directory.CreateDirectory(REEL_DISK_CACHE_DIR); } catch { }
+            try
+            {
+                if (!Directory.Exists(REEL_DISK_CACHE_DIR)) Directory.CreateDirectory(REEL_DISK_CACHE_DIR);
+            }
+            catch (Exception ex) { Log.Debug(ex, "创建视频胶片缓存目录"); }
 
             WindowStyle = System.Windows.WindowStyle.None;
             AllowsTransparency = false;
@@ -125,7 +122,7 @@ namespace DshGalleryExplorer
             System.Windows.Controls.Grid.SetRow(headerBar, 0);
             rootGrid.Children.Add(headerBar);
 
-            // Row 1: Dual-Engine Hardware Video Stage (MediaElement for short clips + HighFpsImage for 612-frame 120fps long videos)
+            // Row 1: Dual-Engine Hardware Video Stage (MediaElement for short clips + HighFpsImage for ~611-frame 120fps long videos)
             System.Windows.Controls.Grid videoStage = new System.Windows.Controls.Grid
             {
                 Background = System.Windows.Media.Brushes.Black,
@@ -198,7 +195,7 @@ namespace DshGalleryExplorer
                 // WS_EX_TRANSPARENT (0x20) | WS_EX_TOOLWINDOW (0x80) | WS_EX_NOACTIVATE (0x08000000)
                 SetWindowLong(hwnd, -20, exStyle | 0x00000020 | 0x00000080 | 0x08000000);
             }
-            catch { }
+            catch (Exception ex) { Log.Debug(ex, "设置预览窗穿透样式"); }
         }
 
         public string CurrentVideoPath { get { return _currentVideoPath; } }
@@ -221,7 +218,11 @@ namespace DshGalleryExplorer
                     return bmi;
                 }
             }
-            catch { return null; }
+            catch (Exception ex)
+            {
+                Log.Debug(ex, "转换封面位图到 WPF BitmapImage");
+                return null;
+            }
         }
 
         public void ShowOrUpdatePreview(string videoPath, Point cursorScreenPt, Bitmap fallbackCoverBitmap = null)
@@ -246,26 +247,26 @@ namespace DshGalleryExplorer
                 _fpsWindowStartMs = 0;
                 lock (_framesLock)
                 {
-                    _activeFrameJpegs = new List<byte[]>();
+                    _activeDecodedFrames = new List<System.Windows.Media.Imaging.BitmapSource>();
                 }
 
                 _titleText.Text = Path.GetFileName(videoPath);
                 _progressFill.Width = 0;
 
-                // 0ms Instant Check: If memory reel cache already has the 612-frame stream, play immediately with zero delay!
-                List<byte[]> memCached;
-                if (_memoryReelCache.TryGetValue(videoPath, out memCached) && memCached != null && memCached.Count > 30)
+                // 0ms Instant Check: If memory cache already holds pre-decoded frozen BitmapSources, play immediately with zero decode!
+                List<System.Windows.Media.Imaging.BitmapSource> memCached;
+                if (_memoryDecodedReelCache.TryGetValue(videoPath, out memCached) && memCached != null && memCached.Count > 30)
                 {
                     lock (_framesLock)
                     {
-                        _activeFrameJpegs = memCached;
+                        _activeDecodedFrames = memCached;
                     }
                     _isHighFpsStreamMode = true;
                     _mediaReady = true;
                     _durationSeconds = 15.0;
                     _currentSpeedRatio = 3.0;
                     _lastRenderedFrameIdx = 0;
-                    System.Windows.Media.Imaging.BitmapImage firstBmi = DecodeJpegBytesToBitmapImage(memCached[0]);
+                    System.Windows.Media.Imaging.BitmapSource firstBmi = memCached[0];
                     if (firstBmi != null)
                     {
                         _highFpsImage.Source = firstBmi;
@@ -283,7 +284,7 @@ namespace DshGalleryExplorer
                         _mediaElement.Stop();
                         _mediaElement.Source = null;
                     }
-                    catch { }
+                    catch (Exception ex) { Log.Debug(ex, "停止 MediaElement"); }
                 }
                 else
                 {
@@ -297,7 +298,6 @@ namespace DshGalleryExplorer
                         }
                         _highFpsImage.Source = coverBmi;
                         _highFpsImage.Visibility = System.Windows.Visibility.Visible;
-                        // Keep _mediaElement underneath or hidden until ready so black surface never covers the cover thumbnail
                         _mediaElement.Visibility = System.Windows.Visibility.Hidden;
                     }
                     else
@@ -309,15 +309,12 @@ namespace DshGalleryExplorer
 
                     _timeBadgeText.Text = "极速加载中...";
 
-                    // Parallel Track A: Kick off FFmpeg disk-reel check & fast probe + chunk-0 stream immediately on background thread
-                    // without waiting 300-800ms for WPF MediaElement.MediaOpened!
                     string ffmpegExe = ResolveFfmpegPath();
                     if (!string.IsNullOrEmpty(ffmpegExe))
                     {
                         StartImmediateReelOrProbePipeline(videoPath, gen, ffmpegExe);
                     }
 
-                    // Parallel Track B: Also start native MediaElement for short clips (<= 20s)
                     try
                     {
                         _mediaElement.Stop();
@@ -326,7 +323,7 @@ namespace DshGalleryExplorer
                         _mediaElement.Source = new Uri(videoPath, UriKind.Absolute);
                         _mediaElement.Play();
                     }
-                    catch { }
+                    catch (Exception ex) { Log.Debug(ex, "启动 MediaElement 预览: " + videoPath); }
                 }
             }
 
@@ -337,6 +334,41 @@ namespace DshGalleryExplorer
             EnsureRenderingHook(true);
         }
 
+        private bool TryHydrateFromDiskReel(string videoPath, int gen, Action onStarterReady)
+        {
+            string diskCachePath = GetReelDiskCachePath(videoPath);
+            List<byte[]> diskFrames = TryLoadReelFromDisk(diskCachePath);
+            if (diskFrames == null || diskFrames.Count <= 30) return false;
+
+            // 先快速解码前 24 帧（~10ms），立即推送到屏幕起播
+            int starterCount = Math.Min(24, diskFrames.Count);
+            List<System.Windows.Media.Imaging.BitmapSource> starter =
+                new List<System.Windows.Media.Imaging.BitmapSource>(starterCount);
+            for (int i = 0; i < starterCount; i++)
+            {
+                if (gen != _streamGeneration) return true;
+                System.Windows.Media.Imaging.BitmapImage b = DecodeJpegBytesToBitmapImage(diskFrames[i]);
+                if (b != null) starter.Add(b);
+            }
+            if (starter.Count > 0 && gen == _streamGeneration)
+            {
+                lock (_framesLock) { _activeDecodedFrames = starter; }
+                if (onStarterReady != null) onStarterReady();
+            }
+
+            // 再多核并行解码全量 611 帧（~45ms），写入内存缓存
+            List<System.Windows.Media.Imaging.BitmapSource> fullDecoded = DecodeReelParallel(diskFrames);
+            if (fullDecoded.Count > 30)
+            {
+                CacheDecodedReelInMemory(videoPath, fullDecoded);
+                if (gen == _streamGeneration)
+                {
+                    lock (_framesLock) { _activeDecodedFrames = fullDecoded; }
+                }
+            }
+            return true;
+        }
+
         private void StartImmediateReelOrProbePipeline(string videoPath, int gen, string ffmpegExe)
         {
             ThreadPool.QueueUserWorkItem(_ =>
@@ -345,23 +377,17 @@ namespace DshGalleryExplorer
                 {
                     if (gen != _streamGeneration) return;
 
-                    // 1. Check disk reel cache first (~3-5ms if previously hovered)
+                    // 1. Check disk reel cache first (~3-5ms read + ~10ms starter decode)
                     string diskCachePath = GetReelDiskCachePath(videoPath);
-                    List<byte[]> diskFrames = TryLoadReelFromDisk(diskCachePath);
-                    if (diskFrames != null && diskFrames.Count > 30)
+                    if (!string.IsNullOrEmpty(diskCachePath) && File.Exists(diskCachePath))
                     {
-                        _memoryReelCache[videoPath] = diskFrames;
                         double probedDur = 0.0;
                         int pvw = 0, pvh = 0;
                         ProbeVideoDurationAndResolutionViaFfmpeg(ffmpegExe, videoPath, out probedDur, out pvw, out pvh);
                         if (probedDur <= 0.05) probedDur = 15.0;
 
-                        if (gen == _streamGeneration)
+                        if (TryHydrateFromDiskReel(videoPath, gen, () =>
                         {
-                            lock (_framesLock)
-                            {
-                                _activeFrameJpegs = diskFrames;
-                            }
                             Dispatcher.BeginInvoke(new Action(() =>
                             {
                                 if (gen != _streamGeneration || !string.Equals(_currentVideoPath, videoPath, StringComparison.OrdinalIgnoreCase))
@@ -371,13 +397,15 @@ namespace DshGalleryExplorer
                                 _mediaReady = true;
                                 _isHighFpsStreamMode = true;
                                 if (pvw > 0 && pvh > 0) ApplyPreviewWindowAspect(pvw, pvh);
-                                try { _mediaElement.Pause(); } catch { }
+                                try { _mediaElement.Pause(); } catch (Exception ex) { Log.Debug(ex, "暂停 MediaElement"); }
                                 _highFpsImage.Visibility = System.Windows.Visibility.Visible;
                                 _mediaElement.Visibility = System.Windows.Visibility.Collapsed;
                                 _cycleClock.Restart();
                             }));
+                        }))
+                        {
+                            return;
                         }
-                        return;
                     }
 
                     // 2. Probe duration & resolution via FFmpeg (~35ms)
@@ -390,7 +418,6 @@ namespace DshGalleryExplorer
                     if (gen != _streamGeneration) return;
 
                     double idealSpeed = dur / TARGET_PREVIEW_CYCLE_SECONDS;
-                    // If medium/long video (> 20s, idealSpeed > 4.0x), immediately start High-FPS Reel Stream without waiting for MediaElement!
                     if (idealSpeed > 4.0)
                     {
                         Dispatcher.BeginInvoke(new Action(() =>
@@ -402,7 +429,7 @@ namespace DshGalleryExplorer
                             _mediaReady = true;
                             _isHighFpsStreamMode = true;
                             if (vw > 0 && vh > 0) ApplyPreviewWindowAspect(vw, vh);
-                            try { _mediaElement.Pause(); } catch { }
+                            try { _mediaElement.Pause(); } catch (Exception ex) { Log.Debug(ex, "暂停 MediaElement"); }
                             _cycleClock.Restart();
                             _fpsWindowStartMs = 0;
                             _framesPresentedInSec = 0;
@@ -410,7 +437,7 @@ namespace DshGalleryExplorer
                         StartHighFpsReelStream(videoPath, dur, gen, ffmpegExe);
                     }
                 }
-                catch { }
+                catch (Exception ex) { Log.Debug(ex, "后台探测与胶片流水线异常: " + videoPath); }
             });
         }
 
@@ -431,7 +458,7 @@ namespace DshGalleryExplorer
                     _mediaElement.Source = null;
                     _highFpsImage.Source = null;
                 }
-                catch { }
+                catch (Exception ex) { Log.Debug(ex, "隐藏预览清理播放器"); }
             }
             if (IsVisible)
             {
@@ -496,7 +523,7 @@ namespace DshGalleryExplorer
                 Left = targetPxX / dpiX;
                 Top = targetPxY / dpiY;
             }
-            catch { }
+            catch (Exception ex) { Log.Debug(ex, "更新预览悬浮窗位置"); }
         }
 
         private void ApplyPreviewWindowAspect(int vw, int vh)
@@ -575,12 +602,10 @@ namespace DshGalleryExplorer
                 ApplyPreviewWindowAspect(vw, vh);
             }
 
-            // If our fast background FFmpeg probe/reel pipeline already took over in High-FPS Stream Mode,
-            // keep _mediaElement paused and do NOT restart or duplicate the FFmpeg stream!
             if (_isHighFpsStreamMode)
             {
                 _mediaReady = true;
-                try { _mediaElement.Pause(); } catch { }
+                try { _mediaElement.Pause(); } catch (Exception ex) { Log.Debug(ex, "暂停已接管的 MediaElement"); }
                 return;
             }
 
@@ -601,9 +626,6 @@ namespace DshGalleryExplorer
             double idealSpeed = _durationSeconds / TARGET_PREVIEW_CYCLE_SECONDS;
             _currentSpeedRatio = Math.Max(1.0, idealSpeed);
 
-            // For short videos (<= 20s, speed <= 4.0x), native MediaElement hardware decode delivers 60-120fps directly.
-            // For medium/long videos (> 20s, e.g. 10-minute video = 120x speed), MediaElement either caps at 4-8x or stalls on seeks (~20fps).
-            // Switch to our 612-frame High-FPS Stream Engine so 5 seconds displays ~612 distinct frames at 120fps!
             string ffmpegExe = ResolveFfmpegPath();
             if (idealSpeed <= 4.0 || string.IsNullOrEmpty(ffmpegExe))
             {
@@ -617,29 +639,25 @@ namespace DshGalleryExplorer
                     _mediaElement.SpeedRatio = Math.Min(8.0, _currentSpeedRatio);
                     _mediaElement.Play();
                 }
-                catch { }
+                catch (Exception ex) { Log.Debug(ex, "播放短视频 MediaElement"); }
             }
             else
             {
                 _isHighFpsStreamMode = true;
-                try
-                {
-                    _mediaElement.Pause();
-                }
-                catch { }
+                try { _mediaElement.Pause(); } catch (Exception ex) { Log.Debug(ex, "切换高帧率胶片时暂停 MediaElement"); }
                 StartHighFpsReelStream(_currentVideoPath, _durationSeconds, _streamGeneration, ffmpegExe);
             }
         }
 
         private void StartHighFpsReelStream(string videoPath, double durationSec, int gen, string ffmpegExe)
         {
-            // 1. Check instant memory cache
-            List<byte[]> cached;
-            if (_memoryReelCache.TryGetValue(videoPath, out cached) && cached != null && cached.Count > 30)
+            // 1. Check instant pre-decoded memory cache
+            List<System.Windows.Media.Imaging.BitmapSource> cached;
+            if (_memoryDecodedReelCache.TryGetValue(videoPath, out cached) && cached != null && cached.Count > 30)
             {
                 lock (_framesLock)
                 {
-                    _activeFrameJpegs = cached;
+                    _activeDecodedFrames = cached;
                 }
                 _highFpsImage.Visibility = System.Windows.Visibility.Visible;
                 _mediaElement.Visibility = System.Windows.Visibility.Collapsed;
@@ -647,47 +665,38 @@ namespace DshGalleryExplorer
                 return;
             }
 
-            // 2. Check disk cache or stream-extract 612 frames (36 micro-bursts x 17 frames) in background
+            // 2. Check disk cache or stream-extract ~611 frames (17 starter + 11x54 chunks across 4 workers) with background decode
             ThreadPool.QueueUserWorkItem(_ =>
             {
                 try
                 {
-                    string diskCachePath = GetReelDiskCachePath(videoPath);
-                    List<byte[]> diskFrames = TryLoadReelFromDisk(diskCachePath);
-                    if (diskFrames != null && diskFrames.Count > 30)
+                    if (TryHydrateFromDiskReel(videoPath, gen, () =>
                     {
-                        _memoryReelCache[videoPath] = diskFrames;
-                        if (gen == _streamGeneration)
+                        Dispatcher.BeginInvoke(new Action(() =>
                         {
-                            lock (_framesLock)
+                            if (gen == _streamGeneration)
                             {
-                                _activeFrameJpegs = diskFrames;
+                                _highFpsImage.Visibility = System.Windows.Visibility.Visible;
+                                _mediaElement.Visibility = System.Windows.Visibility.Collapsed;
+                                _cycleClock.Restart();
                             }
-                            Dispatcher.BeginInvoke(new Action(() =>
-                            {
-                                if (gen == _streamGeneration)
-                                {
-                                    _highFpsImage.Visibility = System.Windows.Visibility.Visible;
-                                    _mediaElement.Visibility = System.Windows.Visibility.Collapsed;
-                                    _cycleClock.Restart();
-                                }
-                            }));
-                        }
+                        }));
+                    }))
+                    {
                         return;
                     }
 
-                    // Stream-extract 36 chunks across the video timeline:
-                    // Extract Chunk 0 FIRST without contention so the first 17 frames appear in ~50-80ms,
-                    // then extract remaining chunks 1..35 across 3 concurrent background workers!
-                    List<byte[]> finalReel = BuildReel(ffmpegExe, videoPath, durationSec, TARGET_REEL_CHUNKS, TARGET_FRAMES_PER_CHUNK, 3,
+                    string diskCachePath = GetReelDiskCachePath(videoPath);
+                    List<System.Windows.Media.Imaging.BitmapSource> finalDecoded;
+                    List<byte[]> finalRaw = BuildReelOptimized(ffmpegExe, videoPath, durationSec,
                         () => gen != _streamGeneration,
-                        progressive =>
+                        progressiveDecoded =>
                         {
                             bool firstSwitch = false;
                             lock (_framesLock)
                             {
-                                firstSwitch = (_activeFrameJpegs.Count == 0);
-                                _activeFrameJpegs = progressive;
+                                firstSwitch = (_activeDecodedFrames.Count == 0);
+                                _activeDecodedFrames = progressiveDecoded;
                             }
                             if (firstSwitch)
                             {
@@ -701,22 +710,20 @@ namespace DshGalleryExplorer
                                     }
                                 }));
                             }
-                        });
+                        },
+                        out finalDecoded);
 
-                    if (finalReel != null && gen == _streamGeneration)
+                    if (finalRaw != null && finalDecoded != null && finalDecoded.Count > 30 && gen == _streamGeneration)
                     {
-                        if (finalReel.Count > 30)
+                        CacheDecodedReelInMemory(videoPath, finalDecoded);
+                        lock (_framesLock)
                         {
-                            _memoryReelCache[videoPath] = finalReel;
-                            lock (_framesLock)
-                            {
-                                _activeFrameJpegs = finalReel;
-                            }
-                            SaveReelToDisk(diskCachePath, finalReel);
+                            _activeDecodedFrames = finalDecoded;
                         }
+                        SaveReelToDisk(diskCachePath, finalRaw);
                     }
                 }
-                catch { }
+                catch (Exception ex) { Log.Debug(ex, "后台高帧率胶片抽帧异常: " + videoPath); }
             });
         }
 
@@ -732,7 +739,7 @@ namespace DshGalleryExplorer
                     _mediaElement.Play();
                 }
             }
-            catch { }
+            catch (Exception ex) { Log.Debug(ex, "MediaEnded 循环重播"); }
         }
 
         private void EnsureRenderingHook(bool attach)
@@ -758,10 +765,10 @@ namespace DshGalleryExplorer
 
             if (_isHighFpsStreamMode)
             {
-                List<byte[]> framesSnapshot;
+                List<System.Windows.Media.Imaging.BitmapSource> framesSnapshot;
                 lock (_framesLock)
                 {
-                    framesSnapshot = _activeFrameJpegs;
+                    framesSnapshot = _activeDecodedFrames;
                 }
                 totalReelFrames = framesSnapshot != null ? framesSnapshot.Count : 0;
 
@@ -779,19 +786,14 @@ namespace DshGalleryExplorer
                     if (targetIdx != _lastRenderedFrameIdx)
                     {
                         _lastRenderedFrameIdx = targetIdx;
-                        byte[] jpg = framesSnapshot[targetIdx];
-                        if (jpg != null && jpg.Length > 0)
+                        System.Windows.Media.Imaging.BitmapSource bmi = framesSnapshot[targetIdx];
+                        if (bmi != null)
                         {
-                            System.Windows.Media.Imaging.BitmapImage bmi;
-                            using (Perf.Measure("reel.uiDecode"))
-                            {
-                                bmi = DecodeJpegBytesToBitmapImage(jpg);
-                            }
-                            if (bmi != null)
+                            using (Perf.Measure("reel.uiPresent"))
                             {
                                 _highFpsImage.Source = bmi;
-                                _framesPresentedInSec++;
                             }
+                            _framesPresentedInSec++;
                         }
                     }
 
@@ -817,7 +819,7 @@ namespace DshGalleryExplorer
                         posSec = 0.0;
                     }
                 }
-                catch { }
+                catch (Exception ex) { Log.Debug(ex, "读取 MediaElement 播放位置"); }
             }
 
             double progressRatio = Math.Max(0.0, Math.Min(1.0, posSec / _durationSeconds));
@@ -829,7 +831,7 @@ namespace DshGalleryExplorer
 
             if (_isHighFpsStreamMode && totalReelFrames > 0)
             {
-                _timeBadgeText.Text = string.Format("{0:0.0}s / {1:0.0}s ({2}帧·120fps)", posSec, _durationSeconds, totalReelFrames);
+                _timeBadgeText.Text = string.Format("{0:0.0}s / {1:0.0}s ({2}帧·{3}fps)", posSec, _durationSeconds, totalReelFrames, _measuredFps);
             }
             else
             {

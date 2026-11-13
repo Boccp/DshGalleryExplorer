@@ -474,7 +474,7 @@ namespace DshGalleryExplorer
 
         private static void BenchViewer(List<EntryItem> items, int frames)
         {
-            frames = Math.Min(frames, 12); // 基线版本单帧可达秒级，限制帧数避免基准测试过久
+            frames = Math.Min(frames, 40);
             string largest = null;
             long largestLen = -1;
             List<string> imgs = new List<string>();
@@ -576,10 +576,9 @@ namespace DshGalleryExplorer
                 Line("测试目录中没有视频。");
                 return;
             }
-            Line("策略 = 程序当前实现：36 段 × 17 帧，第 0 段单独先抽，其余 35 段 3 个并发 ffmpeg 进程；540px 宽 MJPEG q4。");
-            Line("“首帧”= 从开始抽取到第一批帧可显示；JPEG 解码 = 当前在 UI 线程 CompositionTarget.Rendering 中执行的 BitmapImage 解码。");
+            Line("策略 = v2 优化版当前实现：第 0 段 17 帧极速首包 + 11 段 × 54 帧（4 并发 ffmpeg 进程，总进程数从 36 降至 12），后台同步解码为冻结 BitmapSource，UI 线程直接赋值（零 JPEG 解码）。");
             Line("");
-            Line("| 视频 | 大小 MB | 时长 s | 分辨率 | probe ms | 首帧 ms | 全部 ms | 帧数 | 平均帧 KB | JPEG 解码 avg ms | p95 ms |");
+            Line("| 视频 | 大小 MB | 时长 s | 分辨率 | probe ms | 首帧(含解码) ms | 全部抽帧+后台解码 ms | 磁盘缓存热载全量解码 ms | 帧数 | 平均帧 KB | UI 线程解码 ms |");
             Line("| :--- | ---: | ---: | :---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |");
             foreach (string v in videos)
             {
@@ -597,36 +596,66 @@ namespace DshGalleryExplorer
             if (!okProbe) dur = 15.0;
 
             double firstMs = -1;
+            List<System.Windows.Media.Imaging.BitmapSource> decoded;
             sw.Restart();
-            List<byte[]> reel = VideoHoverPreviewWindow.BuildReel(ffmpeg, video, dur, 36, 17, 3, () => false, progressive =>
+            List<byte[]> reel = VideoHoverPreviewWindow.BuildReelOptimized(ffmpeg, video, dur, () => false, progressiveDecoded =>
             {
                 if (firstMs < 0) firstMs = sw.Elapsed.TotalMilliseconds;
-            });
+            }, out decoded);
             double totalMs = sw.Elapsed.TotalMilliseconds;
-            int frames = reel != null ? reel.Count : 0;
+            int frames = decoded != null ? decoded.Count : 0;
             long bytes = 0;
             if (reel != null) foreach (byte[] b in reel) bytes += b.Length;
 
-            string decName = "bench.jpegDecode.wpf." + Path.GetFileName(video);
-            if (reel != null)
+            // 测量并行解码（模拟磁盘 .reel 命中后的后台全量解码耗时）
+            double warmDecodeMs = -1;
+            if (reel != null && reel.Count > 0)
             {
-                foreach (byte[] b in reel)
-                {
-                    Stopwatch d = Stopwatch.StartNew();
-                    VideoHoverPreviewWindow.DecodeJpegBytesToBitmapImage(b);
-                    Perf.Record(decName, d.Elapsed.TotalMilliseconds);
-                }
+                sw.Restart();
+                VideoHoverPreviewWindow.DecodeReelParallel(reel);
+                warmDecodeMs = sw.Elapsed.TotalMilliseconds;
             }
-            Perf.Summary ds = Perf.Get(decName);
+
             long len = new FileInfo(video).Length;
-            Line(string.Format("| `{0}` | {1} | {2} | {3}x{4} | {5} | {6} | {7} | {8} | {9} | {10} | {11} |",
-                Path.GetFileName(video), F1(len / 1048576.0), F1(dur), vw, vh, F(probeMs), F(firstMs), F(totalMs), frames,
-                F1(frames > 0 ? bytes / 1024.0 / frames : 0), ds != null ? F(ds.AvgMs) : "-", ds != null ? F(ds.P95Ms) : "-"));
+            Line(string.Format("| `{0}` | {1} | {2} | {3}x{4} | {5} | {6} | {7} | {8} | {9} | {10} | 0.00 (已后台冻结) |",
+                Path.GetFileName(video), F1(len / 1048576.0), F1(dur), vw, vh, F(probeMs), F(firstMs), F(totalMs),
+                warmDecodeMs >= 0 ? F(warmDecodeMs) : "-", frames,
+                F1(frames > 0 ? bytes / 1024.0 / frames : 0)));
         }
 
         private static void BenchVideoExtras(List<string> videos, string ffmpeg)
         {
-            // 阶段 C 的对比实验挂载点（阶段 A 无）
+            Line("");
+            Line("### 同机对比：v1 旧版策略（36 段 × 17 帧 × 3 并发进程 + UI 线程逐帧 JPEG 解码）");
+            Line("");
+            Line("| 视频 | 旧版首帧(未解码) ms | 旧版全部抽帧 ms | 帧数 | 旧版 UI 线程 JPEG 解码 avg ms | p95 ms |");
+            Line("| :--- | ---: | ---: | ---: | ---: | ---: |");
+            foreach (string video in videos)
+            {
+                double dur; int vw, vh;
+                if (!VideoHoverPreviewWindow.ProbeVideoDurationAndResolutionViaFfmpeg(ffmpeg, video, out dur, out vw, out vh)) dur = 15.0;
+                double firstMs = -1;
+                Stopwatch sw = Stopwatch.StartNew();
+                List<byte[]> reel = VideoHoverPreviewWindow.BuildReel(ffmpeg, video, dur, 36, 17, 3, () => false, progressive =>
+                {
+                    if (firstMs < 0) firstMs = sw.Elapsed.TotalMilliseconds;
+                });
+                double totalMs = sw.Elapsed.TotalMilliseconds;
+                string decName = "bench.v1JpegDecode." + Path.GetFileName(video);
+                if (reel != null)
+                {
+                    foreach (byte[] b in reel)
+                    {
+                        Stopwatch d = Stopwatch.StartNew();
+                        VideoHoverPreviewWindow.DecodeJpegBytesToBitmapImage(b);
+                        Perf.Record(decName, d.Elapsed.TotalMilliseconds);
+                    }
+                }
+                Perf.Summary ds = Perf.Get(decName);
+                Line(string.Format("| `{0}` | {1} | {2} | {3} | {4} | {5} |",
+                    Path.GetFileName(video), F(firstMs), F(totalMs), reel != null ? reel.Count : 0,
+                    ds != null ? F(ds.AvgMs) : "-", ds != null ? F(ds.P95Ms) : "-"));
+            }
         }
     }
 }

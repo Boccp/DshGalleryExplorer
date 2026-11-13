@@ -85,6 +85,7 @@ namespace DshGalleryExplorer
             BackColor = Color.FromArgb(12, 14, 18);
             ForeColor = Color.White;
             DoubleBuffered = true;
+            ResizeRedraw = true;
             KeyPreview = true;
 
             string appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
@@ -97,7 +98,7 @@ namespace DshGalleryExplorer
                 if (!Directory.Exists(_saveFolderPath))
                     Directory.CreateDirectory(_saveFolderPath);
             }
-            catch { }
+            catch (Exception ex) { Log.Warn(ex, "创建看图器截图目录失败: " + _saveFolderPath); }
 
             BuildScreenshotSaveBar();
 
@@ -148,7 +149,7 @@ namespace DshGalleryExplorer
                             _imageList.Add(f);
                     }
                 }
-                catch { }
+                catch (Exception ex) { Log.Warn(ex, "枚举看图器同目录图片失败"); }
             }
             _currentIndex = Math.Max(0, _imageList.FindIndex(p => string.Equals(p, currentImagePath, StringComparison.OrdinalIgnoreCase)));
             if (_imageList.Count == 0) _imageList.Add(currentImagePath);
@@ -280,6 +281,7 @@ namespace DshGalleryExplorer
             if (disposing)
             {
                 if (_uiOverlayTimer != null) { _uiOverlayTimer.Stop(); _uiOverlayTimer.Dispose(); _uiOverlayTimer = null; }
+                DisposeViewerPaintCache();
                 if (_currentBitmap != null) { _currentBitmap.Dispose(); _currentBitmap = null; }
                 if (_savedPreviewThumb != null) { _savedPreviewThumb.Dispose(); _savedPreviewThumb = null; }
             }

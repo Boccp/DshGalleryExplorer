@@ -1,47 +1,70 @@
-// 视频预览胶片：ffmpeg 探测/抽帧、内存与磁盘缓存、JPEG 解码。
+// 视频预览胶片：ffmpeg 探测/抽帧（17帧极速首包 + 11段×54帧低进程开销并发抽帧）、后台预解码冻结 BitmapSource、内存与磁盘缓存。
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.Collections.Specialized;
 using System.Diagnostics;
-using System.Drawing;
-using System.Drawing.Drawing2D;
-using System.Drawing.Imaging;
 using System.IO;
-using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
-using System.Windows.Forms;
+using System.Windows.Media.Imaging;
 
 namespace DshGalleryExplorer
 {
     internal sealed partial class VideoHoverPreviewWindow
     {
-        private static readonly ConcurrentDictionary<string, List<byte[]>> _memoryReelCache =
-            new ConcurrentDictionary<string, List<byte[]>>(StringComparer.OrdinalIgnoreCase);
+        private const int MAX_MEMORY_CACHED_REELS = 24;
+        private static readonly ConcurrentDictionary<string, List<BitmapSource>> _memoryDecodedReelCache =
+            new ConcurrentDictionary<string, List<BitmapSource>>(StringComparer.OrdinalIgnoreCase);
+        private static readonly ConcurrentQueue<string> _memoryReelOrder = new ConcurrentQueue<string>();
+
         private static string REEL_DISK_CACHE_DIR { get { return AppPaths.VideoReelCacheDir; } }
-        private static readonly string[] FFMPEG_CANDIDATE_PATHS = new[]
-        {
-            @"D:\_tools\ffmpeg.exe",
-            @"D:\JianyingPro\11.5.0.14471\ffmpeg.exe",
-            @"D:\JianyingPro\11.4.2.14459\ffmpeg.exe",
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), @"JianyingPro\Apps\10.7.0.14095\ffmpeg.exe"),
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), @"hermes\tools\ffmpeg-9.0.1-win32-x64\bin\ffmpeg.exe"),
-            @"C:\Users\Administrator\AppData\Local\hermes\tools\ffmpeg-9.0.1-win32-x64\bin\ffmpeg.exe",
-            @"C:\Users\Administrator\Desktop\处理图片和视频\ffmpeg.exe",
-            @"F:\剪映\9.9.0.13784\ffmpeg.exe"
-        };
 
         internal static string ResolveFfmpegPath()
         {
-            foreach (string p in FFMPEG_CANDIDATE_PATHS)
+            return AppPaths.ResolveFfmpegPath();
+        }
+
+        private static void CacheDecodedReelInMemory(string videoPath, List<BitmapSource> frames)
+        {
+            if (string.IsNullOrEmpty(videoPath) || frames == null || frames.Count <= 30) return;
+            if (_memoryDecodedReelCache.TryAdd(videoPath, frames))
             {
-                if (File.Exists(p)) return p;
+                _memoryReelOrder.Enqueue(videoPath);
+                while (_memoryDecodedReelCache.Count > MAX_MEMORY_CACHED_REELS)
+                {
+                    string oldest;
+                    if (!_memoryReelOrder.TryDequeue(out oldest)) break;
+                    List<BitmapSource> removed;
+                    _memoryDecodedReelCache.TryRemove(oldest, out removed);
+                }
             }
-            return null;
+            else
+            {
+                _memoryDecodedReelCache[videoPath] = frames;
+            }
+        }
+
+        internal static List<BitmapSource> DecodeReelParallel(List<byte[]> jpegs)
+        {
+            if (jpegs == null || jpegs.Count == 0) return new List<BitmapSource>();
+            BitmapSource[] arr = new BitmapSource[jpegs.Count];
+            Parallel.For(0, jpegs.Count, i =>
+            {
+                byte[] b = jpegs[i];
+                if (b != null && b.Length > 0)
+                {
+                    arr[i] = DecodeJpegBytesToBitmapImage(b);
+                }
+            });
+            List<BitmapSource> res = new List<BitmapSource>(jpegs.Count);
+            for (int i = 0; i < arr.Length; i++)
+            {
+                if (arr[i] != null) res.Add(arr[i]);
+            }
+            return res;
         }
 
         internal static bool ProbeVideoDurationAndResolutionViaFfmpeg(string ffmpegExe, string videoPath, out double durationSec, out int width, out int height)
@@ -68,7 +91,7 @@ namespace DshGalleryExplorer
                 {
                     if (proc == null) return false;
                     string err = proc.StandardError.ReadToEnd();
-                    try { proc.WaitForExit(1500); } catch { }
+                    try { proc.WaitForExit(1500); } catch (Exception ex) { Log.Debug(ex, "等待 ffmpeg probe 退出"); }
 
                     Match mDur = Regex.Match(err ?? "", @"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)");
                     if (mDur.Success)
@@ -88,7 +111,7 @@ namespace DshGalleryExplorer
                     return durationSec > 0.05;
                 }
             }
-            catch { }
+            catch (Exception ex) { Log.Debug(ex, "ffmpeg 探测视频失败: " + videoPath); }
             return false;
         }
 
@@ -106,7 +129,11 @@ namespace DshGalleryExplorer
                     return Path.Combine(REEL_DISK_CACHE_DIR, sb.ToString() + ".reel");
                 }
             }
-            catch { return null; }
+            catch (Exception ex)
+            {
+                Log.Debug(ex, "计算视频胶片缓存路径");
+                return null;
+            }
         }
 
         private static List<byte[]> TryLoadReelFromDisk(string cacheFile)
@@ -133,7 +160,11 @@ namespace DshGalleryExplorer
                 }
                 return frames.Count > 30 ? frames : null;
             }
-            catch { return null; }
+            catch (Exception ex)
+            {
+                Log.Debug(ex, "读取磁盘胶片缓存失败: " + cacheFile);
+                return null;
+            }
         }
 
         private static void SaveReelToDisk(string cacheFile, List<byte[]> frames)
@@ -141,7 +172,9 @@ namespace DshGalleryExplorer
             try
             {
                 if (string.IsNullOrEmpty(cacheFile) || frames == null || frames.Count < 30) return;
-                string tmp = cacheFile + ".tmp";
+                string dir = Path.GetDirectoryName(cacheFile);
+                if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir)) Directory.CreateDirectory(dir);
+                string tmp = cacheFile + "." + Thread.CurrentThread.ManagedThreadId + ".tmp";
                 using (FileStream fs = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None, 65536))
                 using (BinaryWriter bw = new BinaryWriter(fs))
                 {
@@ -157,7 +190,7 @@ namespace DshGalleryExplorer
                 if (File.Exists(cacheFile)) File.Delete(cacheFile);
                 File.Move(tmp, cacheFile);
             }
-            catch { }
+            catch (Exception ex) { Log.Debug(ex, "写入磁盘胶片缓存失败: " + cacheFile); }
         }
 
         internal static List<byte[]> ParseConcatenatedJpegs(byte[] raw, int length)
@@ -192,11 +225,107 @@ namespace DshGalleryExplorer
         }
 
         /// <summary>
-        /// 抽取“chunkCount 段 × framesPerChunk 帧”的预览胶片：先无竞争抽取第 0 段（让首帧尽快出现），
-        /// 再用 workerCount 个并发 ffmpeg 进程抽取其余段。
-        /// isCancelled() 为 true 时尽快退出并返回 null；onProgress 在每段完成后收到“按时间顺序拼好的当前全部帧”。
-        /// 第 0 段抛出的异常向调用方传播（与重构前一致）。
+        /// 优化版默认胶片抽取：第 0 段单发 17 帧保证极速首帧（~90ms），其余 11 段 × 54 帧由 4 并发进程抽取，
+        /// 将 ffmpeg 进程创建与解复用开销从 36 次降至 12 次，并在后台线程同步解码为冻结 BitmapSource。
         /// </summary>
+        internal static List<byte[]> BuildReelOptimized(string ffmpegExe, string videoPath, double durationSec,
+            Func<bool> isCancelled, Action<List<BitmapSource>> onDecodedProgress, out List<BitmapSource> finalDecoded)
+        {
+            const int tailChunks = 11;
+            const int starterFrames = 17;
+            const int tailFramesPerChunk = 54;
+            const int workerCount = 4;
+            int totalSlots = 1 + tailChunks;
+
+            double usableDur = Math.Max(1.0, durationSec * 0.985);
+            List<byte[]>[] rawChunks = new List<byte[]>[totalSlots];
+            List<BitmapSource>[] decChunks = new List<BitmapSource>[totalSlots];
+
+            Action<int, int, double> runSlot = (int slot, int frameCount, double seekSec) =>
+            {
+                if (isCancelled()) return;
+                List<byte[]> parsed = ExtractReelChunk(ffmpegExe, videoPath, seekSec, frameCount, isCancelled);
+                if (parsed == null || parsed.Count == 0 || isCancelled()) return;
+
+                List<BitmapSource> dec = new List<BitmapSource>(parsed.Count);
+                for (int i = 0; i < parsed.Count; i++)
+                {
+                    if (isCancelled()) return;
+                    BitmapImage bmi = DecodeJpegBytesToBitmapImage(parsed[i]);
+                    if (bmi != null) dec.Add(bmi);
+                }
+                rawChunks[slot] = parsed;
+                decChunks[slot] = dec;
+
+                if (!isCancelled() && onDecodedProgress != null)
+                {
+                    List<BitmapSource> prog = new List<BitmapSource>(620);
+                    for (int k = 0; k < totalSlots; k++)
+                    {
+                        if (decChunks[k] != null && decChunks[k].Count > 0) prog.AddRange(decChunks[k]);
+                    }
+                    if (prog.Count > 0) onDecodedProgress(prog);
+                }
+            };
+
+            // 1. 零竞争抽取第 0 段 17 帧，确保首帧延迟最低
+            runSlot(0, starterFrames, 0.0);
+            if (isCancelled())
+            {
+                finalDecoded = null;
+                return null;
+            }
+
+            // 2. 4 并发进程抽取后续 11 段 × 54 帧（总进程数从 36 减至 12）
+            int nextSlot = 1;
+            int completedWorkers = 0;
+            using (ManualResetEvent allDone = new ManualResetEvent(false))
+            {
+                for (int w = 0; w < workerCount; w++)
+                {
+                    ThreadPool.QueueUserWorkItem(__ =>
+                    {
+                        try
+                        {
+                            while (true)
+                            {
+                                if (isCancelled()) break;
+                                int s = Interlocked.Increment(ref nextSlot) - 1;
+                                if (s >= totalSlots) break;
+                                double seekSec = (s * usableDur) / totalSlots;
+                                runSlot(s, tailFramesPerChunk, seekSec);
+                            }
+                        }
+                        catch (Exception ex) { Log.Debug(ex, "后台胶片分段抽帧异常"); }
+                        finally
+                        {
+                            if (Interlocked.Increment(ref completedWorkers) == workerCount)
+                            {
+                                try { allDone.Set(); } catch { }
+                            }
+                        }
+                    });
+                }
+                allDone.WaitOne(20000);
+            }
+
+            if (isCancelled())
+            {
+                finalDecoded = null;
+                return null;
+            }
+
+            List<byte[]> finalRaw = new List<byte[]>(620);
+            finalDecoded = new List<BitmapSource>(620);
+            for (int k = 0; k < totalSlots; k++)
+            {
+                if (rawChunks[k] != null) finalRaw.AddRange(rawChunks[k]);
+                if (decChunks[k] != null) finalDecoded.AddRange(decChunks[k]);
+            }
+            return finalRaw;
+        }
+
+        /// <summary>通用分段抽取接口（保留供基准测试对比不同 chunkCount × framesPerChunk × workerCount 参数）。</summary>
         internal static List<byte[]> BuildReel(string ffmpegExe, string videoPath, double durationSec, int chunkCount, int framesPerChunk, int workerCount,
             Func<bool> isCancelled, Action<List<byte[]>> onProgress)
         {
@@ -227,42 +356,39 @@ namespace DshGalleryExplorer
                 }
             };
 
-            // Priority Step 1: Extract Chunk 0 immediately with zero process contention!
             extractSingleChunk(0);
             if (isCancelled()) return null;
 
-            // Priority Step 2: Extract remaining chunks across N concurrent workers
             int nextChunk = 1;
             int completedWorkers = 0;
-            ManualResetEvent allDone = new ManualResetEvent(false);
-
-            for (int w = 0; w < workerCount; w++)
+            using (ManualResetEvent allDone = new ManualResetEvent(false))
             {
-                ThreadPool.QueueUserWorkItem(__ =>
+                for (int w = 0; w < workerCount; w++)
                 {
-                    try
+                    ThreadPool.QueueUserWorkItem(__ =>
                     {
-                        while (true)
+                        try
                         {
-                            if (isCancelled()) break;
-                            int cIdx = Interlocked.Increment(ref nextChunk) - 1;
-                            if (cIdx >= chunkCount) break;
-                            extractSingleChunk(cIdx);
+                            while (true)
+                            {
+                                if (isCancelled()) break;
+                                int cIdx = Interlocked.Increment(ref nextChunk) - 1;
+                                if (cIdx >= chunkCount) break;
+                                extractSingleChunk(cIdx);
+                            }
                         }
-                    }
-                    catch { }
-                    finally
-                    {
-                        if (Interlocked.Increment(ref completedWorkers) == workerCount)
+                        catch (Exception ex) { Log.Debug(ex, "BuildReel 分段异常"); }
+                        finally
                         {
-                            try { allDone.Set(); } catch { }
+                            if (Interlocked.Increment(ref completedWorkers) == workerCount)
+                            {
+                                try { allDone.Set(); } catch { }
+                            }
                         }
-                    }
-                });
+                    });
+                }
+                allDone.WaitOne(20000);
             }
-
-            allDone.WaitOne(20000);
-            allDone.Close();
 
             if (isCancelled()) return null;
 
@@ -277,10 +403,6 @@ namespace DshGalleryExplorer
             return finalReel;
         }
 
-        /// <summary>
-        /// 从 seekSec 处用一个 ffmpeg 进程连续抽取 framesPerChunk 帧（540px 宽 MJPEG），返回拆分后的 JPEG 列表。
-        /// 进程启动失败返回 null；isCancelled() 为 true 时立即杀掉进程。
-        /// </summary>
         internal static List<byte[]> ExtractReelChunk(string ffmpegExe, string videoPath, double seekSec, int framesPerChunk, Func<bool> isCancelled)
         {
             string args = string.Format(
@@ -323,15 +445,16 @@ namespace DshGalleryExplorer
             }
         }
 
-        internal static System.Windows.Media.Imaging.BitmapImage DecodeJpegBytesToBitmapImage(byte[] jpegBytes)
+        internal static BitmapImage DecodeJpegBytesToBitmapImage(byte[] jpegBytes)
         {
             try
             {
                 using (MemoryStream ms = new MemoryStream(jpegBytes, false))
                 {
-                    System.Windows.Media.Imaging.BitmapImage bmi = new System.Windows.Media.Imaging.BitmapImage();
+                    BitmapImage bmi = new BitmapImage();
                     bmi.BeginInit();
-                    bmi.CacheOption = System.Windows.Media.Imaging.BitmapCacheOption.OnLoad;
+                    bmi.CreateOptions = BitmapCreateOptions.IgnoreColorProfile;
+                    bmi.CacheOption = BitmapCacheOption.OnLoad;
                     bmi.StreamSource = ms;
                     bmi.EndInit();
                     bmi.Freeze();
