@@ -63,6 +63,28 @@ namespace DshGalleryExplorer
                             else if (_sortField == SortField.Size) sortProp = "System.Size";
                             string sortSpec = "prop:" + (_sortDescending ? "-" : "") + sortProp + ";";
 
+                            string playlistFile = null;
+                            if ((_sortField == SortField.Tag || !string.IsNullOrEmpty(_activeTagFilter)) && _grid != null && _grid.Items != null)
+                            {
+                                try
+                                {
+                                    List<string> orderedVideos = new List<string>();
+                                    foreach (EntryItem it in _grid.Items)
+                                    {
+                                        if (it != null && !it.IsFolder && VirtualGridCanvas.IsVideoExtension(Path.GetExtension(it.FullPath).ToLowerInvariant()))
+                                            orderedVideos.Add(it.FullPath);
+                                    }
+                                    if (orderedVideos.Count > 0)
+                                    {
+                                        string cacheDir = AppPaths.CacheRoot;
+                                        if (!Directory.Exists(cacheDir)) Directory.CreateDirectory(cacheDir);
+                                        playlistFile = Path.Combine(cacheDir, "_dsh_active_video_playlist.txt");
+                                        File.WriteAllLines(playlistFile, orderedVideos.ToArray(), new UTF8Encoding(false));
+                                    }
+                                }
+                                catch (Exception ex) { Log.Debug(ex, "写入视频播放列表文件"); playlistFile = null; }
+                            }
+
                             ProcessStartInfo psi = new ProcessStartInfo
                             {
                                 FileName = screenboxExe,
@@ -70,6 +92,8 @@ namespace DshGalleryExplorer
                                 UseShellExecute = false
                             };
                             psi.EnvironmentVariables["DSH_GALLERY_SORT_SPEC"] = sortSpec;
+                            if (!string.IsNullOrEmpty(playlistFile))
+                                psi.EnvironmentVariables["DSH_GALLERY_PLAYLIST_FILE"] = playlistFile;
                             Process.Start(psi);
                         }
                         else

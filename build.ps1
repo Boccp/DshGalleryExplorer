@@ -46,12 +46,18 @@ Write-Host "编译成功: $outExe ($sizeKb KB, $([math]::Round($sw.Elapsed.Total
 
 if ($Test) {
     Write-Host "运行排序与配置自检 (--self-test-sort)..." -ForegroundColor Cyan
-    $p = Start-Process -FilePath $outExe -ArgumentList '--self-test-sort' -Wait -PassThru -NoNewWindow
-    if ($p.ExitCode -ne 0) {
-        Write-Host "自检失败! ExitCode = $($p.ExitCode)" -ForegroundColor Red
-        exit $p.ExitCode
+    $tmpTestExe = Join-Path $env:TEMP ("dsh_selftest_bin_" + $PID + ".exe")
+    try {
+        Copy-Item -LiteralPath $outExe -Destination $tmpTestExe -Force
+        $p = Start-Process -FilePath $tmpTestExe -ArgumentList '--self-test-sort' -Wait -PassThru -NoNewWindow
+        if ($p.ExitCode -ne 0) {
+            Write-Host "自检失败! ExitCode = $($p.ExitCode)" -ForegroundColor Red
+            exit $p.ExitCode
+        }
+        Write-Host "自检通过 (exit 0)" -ForegroundColor Green
+    } finally {
+        Remove-Item -LiteralPath $tmpTestExe -Force -ErrorAction SilentlyContinue
     }
-    Write-Host "自检通过 (exit 0)" -ForegroundColor Green
 }
 
 exit 0
