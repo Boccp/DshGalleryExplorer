@@ -45,6 +45,7 @@ namespace DshGalleryExplorer
 
         // Interactive Tilde (~) Screenshot Mode State (ported from ScreenboxLite)
         private bool _isScreenshotModeActive = false;
+        private bool _isShotFlipped = false;
         private CropSelectionMode _cropMode = CropSelectionMode.None;
         private CropHitZone _activeResizeZone = CropHitZone.None;
         private bool _hasActiveSelection = false;
@@ -75,6 +76,7 @@ namespace DshGalleryExplorer
         private System.Windows.Forms.Timer _uiOverlayTimer;
         private long _lastTildeTriggerTick = 0;
         private long _lastKeyRTriggerTick = 0;
+        private long _lastTabTriggerTick = 0;
 
         public FastImageViewerForm(string currentImagePath, List<string> orderedImagePaths = null)
         {
@@ -194,6 +196,7 @@ namespace DshGalleryExplorer
             }
             Bitmap old = _currentBitmap;
             _currentBitmap = bmp;
+            _isShotFlipped = false;
             if (old != null) old.Dispose();
             Text = string.Format("[{0}/{1}] {2}  (按 ~ 键截图，←/→ 键或滚轮翻页，Esc 或双击关闭)", _currentIndex + 1, _imageList.Count, Path.GetFileName(p));
             Invalidate();
@@ -229,6 +232,11 @@ namespace DshGalleryExplorer
                 if (_isScreenshotModeActive && (keyCode == Keys.R || scanCode == 0x13))
                 {
                     RestoreLastCropSelection();
+                    return true;
+                }
+                if (_isScreenshotModeActive && (keyCode == Keys.Tab || scanCode == 0x0F) && (keyData & Keys.Alt) == 0)
+                {
+                    ToggleShotHorizontalFlip();
                     return true;
                 }
             }

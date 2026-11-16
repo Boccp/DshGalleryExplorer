@@ -56,7 +56,7 @@ namespace DshGalleryExplorer
 
             Label tipLbl = new Label
             {
-                Text = "[~截图模式] 左键拖拽或双击两点定框  |  按 [R] 恢复上次裁剪框  |  再按 [~] 保存截图  |  右键/Esc 逐级回退",
+                Text = "[~截图模式] 左键拖拽或双击两点定框  |  按 [Tab] 水平翻转  |  按 [R] 恢复上次框  |  再按 [~] 保存  |  右键/Esc 回退",
                 ForeColor = Color.FromArgb(190, 225, 240),
                 Font = new Font("Microsoft YaHei UI", 9f, FontStyle.Regular),
                 AutoSize = true,
@@ -248,6 +248,16 @@ namespace DshGalleryExplorer
 
         private void ExitScreenshotMode()
         {
+            if (_isShotFlipped && _currentBitmap != null)
+            {
+                try
+                {
+                    _currentBitmap.RotateFlip(RotateFlipType.RotateNoneFlipX);
+                    _scaledViewSource = null;
+                }
+                catch { }
+            }
+            _isShotFlipped = false;
             _isScreenshotModeActive = false;
             _cropMode = CropSelectionMode.None;
             _activeResizeZone = CropHitZone.None;
@@ -256,6 +266,42 @@ namespace DshGalleryExplorer
             _topSaveBarPanel.Visible = false;
             Capture = false;
             Cursor = Cursors.Default;
+            Invalidate();
+        }
+
+        private void ToggleShotHorizontalFlip()
+        {
+            if (!_isScreenshotModeActive || _currentBitmap == null) return;
+            long now = Environment.TickCount;
+            if (Math.Abs(now - _lastTabTriggerTick) < 60) return;
+            _lastTabTriggerTick = now;
+
+            _isShotFlipped = !_isShotFlipped;
+            _currentBitmap.RotateFlip(RotateFlipType.RotateNoneFlipX);
+            _scaledViewSource = null;
+
+            RectangleF imgRect = GetDisplayedImageRect();
+            if (imgRect.Width > 0f)
+            {
+                Func<float, float> mx = x => imgRect.Left + imgRect.Right - x;
+                if (!_currentSelectionRect.IsEmpty && _currentSelectionRect.Width > 0f)
+                {
+                    float nl = mx(_currentSelectionRect.Right);
+                    _currentSelectionRect = ClampRectToBounds(
+                        new RectangleF(nl, _currentSelectionRect.Top, _currentSelectionRect.Width, _currentSelectionRect.Height),
+                        imgRect);
+                }
+                _selectionStartPoint = new PointF(mx(_selectionStartPoint.X), _selectionStartPoint.Y);
+                if (!_resizeStartSelectionRect.IsEmpty && _resizeStartSelectionRect.Width > 0f)
+                {
+                    float rnl = mx(_resizeStartSelectionRect.Right);
+                    _resizeStartSelectionRect = ClampRectToBounds(
+                        new RectangleF(rnl, _resizeStartSelectionRect.Top, _resizeStartSelectionRect.Width, _resizeStartSelectionRect.Height),
+                        imgRect);
+                }
+            }
+
+            ShowToast(_isShotFlipped ? "↔ 已水平翻转画面（保存截图同步翻转，再按 Tab 还原）" : "↔ 已还原原始画面方向");
             Invalidate();
         }
 
