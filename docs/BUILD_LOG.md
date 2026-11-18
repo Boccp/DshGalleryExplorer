@@ -12,6 +12,7 @@
    - **预览、选框与导出 PNG 完全一致**：镜像状态下全屏预览画面、局部像素放大镜、拖拽选框坐标映射以及最终从原始全分辨率位图无损裁切出的 PNG（`RotateFlip(RotateFlipType.RotateNoneFlipX)`）保持严格左右对称一致，HUD 同步显示 `[已水平翻转 | Tab 复原]` 状态提示。
 2. **双仓库自动同步脚本代理与凭据增强（`tools/RepoSync.ps1`）**：
    - 自动按「进程环境变量 → `git config http.proxy` → Windows 系统 Internet Settings (`ProxyEnable` / `ProxyServer`)」三级探测代理，并自动复用 Git Credential Manager / `gh auth` 令牌上传 GitHub Release 产物。
+   - 2026-11-18 同步加固：`Publish-Release` 新增 Release 附件完整性校验与 `System32\curl.exe` HTTP/1.1 自动重试补传机制，防止网络抖动留下无附件的空 Release。
 
 ### 2. 构建产物与自检结果
 | 产物路径 | 大小 | 编译器 / 警告 (`/warn:4`) | `--self-test-sort` 结果 |
