@@ -6,13 +6,16 @@
 
 ```text
 DshGalleryExplorer/
-├── build.ps1                          # 一键编译 + --self-test-sort 自动化自检脚本
-├── version.txt                        # 语义化版本号 (2.0.0)
+├── build.ps1                          # 一键编译 + --self-test-sort 自动化自检脚本（%TEMP% 隔离运行）
+├── version.txt                        # 语义化版本号 (2.0.2)
+├── tools/
+│   └── RepoSync.ps1                   # 双仓库编译自检、本机部署、代理探测与 GitHub Release 同步脚本
 ├── python/                            # Python 侧 NTFS :files 标签读写 SDK 与纯净度治理工具
 │   ├── dsh_file_tags.py
 │   ├── artist_purity_engine.py
 │   └── generate_folder_cover_icons.py
 ├── docs/
+│   ├── BUILD_LOG.md                   # 历次版本构建与开发验证台账
 │   ├── architecture.md                # 本文件：模块边界、外部契约与性能优化设计
 │   ├── perf-baseline.md               # v1 基线与 v2 优化前后实测对比表
 │   └── bench/                         # --bench 自动生成的原始 Markdown 报告
@@ -46,7 +49,7 @@ DshGalleryExplorer/
     ├── Viewer/
     │   ├── FastImageViewerForm.cs     # 内置大图看图器状态与翻页逻辑
     │   ├── FastImageViewerForm.Paint.cs # 视口级预缩放位图缓存（消除每帧大图重采样）
-    │   └── FastImageViewerForm.Screenshot.cs # ~ 键精准框选截图、LockBits 局部像素采样放大镜、右键多级撤回
+    │   └── FastImageViewerForm.Screenshot.cs # ~ 键精准框选截图、Tab 水平镜像翻转、LockBits 局部放大镜、右键多级撤回
     ├── Video/
     │   ├── VideoHoverPreviewWindow.cs # WPF 穿透悬浮预览窗（短视频 MediaElement + 长视频 120fps 胶片双引擎）
     │   └── VideoHoverPreviewWindow.Reel.cs # 17帧首包 + 11×54帧低进程开销抽帧 + 后台预解码冻结 BitmapSource
@@ -76,6 +79,9 @@ DshGalleryExplorer/
    - `_dsh_sidebar_shortcuts.json`（左侧快捷栏）
    - `_dsh_archive_root.txt`（`Ctrl+T` 归档根目录）
    - 可选 `config.ini`（支持自定义 `CacheDir`、`DefaultStartDir`、`DefaultArchiveDir`、`ScreenboxPath`、`FfmpegPath`、`LogLevel=Debug`）。
+4. **与 `ScreenboxLite` 的视频播放列表接力契约（`MainWindow.Open.cs`）**：
+   - 常规目录排序：启动子进程时注入 `DSH_GALLERY_SORT_SPEC=<Name|CreatedTime|ModifiedTime|Size>:<Asc|Desc>`。
+   - 标签颜色排序或四色筛选视图：将当前有序视频路径列表写入 `%USERPROFILE%\.dsh\gallery_cache\_dsh_active_video_playlist.txt` 并注入 `DSH_GALLERY_PLAYLIST_FILE`（`ScreenboxLite` v2.0.3+ 优先按该清单执行 `PageUp/PageDown` 邻片切换）。
 
 ---
 

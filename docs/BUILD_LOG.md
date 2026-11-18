@@ -4,6 +4,37 @@
 
 ---
 
+## v2.0.2 构建与开发记录（2026-11-16，Commit `805e8f4`，2026-11-18 补录文档并复验）
+
+### 1. 变更摘要
+1. **内置看图器 `~` 框选截图支持 `Tab` 键水平镜像翻转（`src/Viewer/FastImageViewerForm.Screenshot.cs`、`src/Viewer/FastImageViewerForm.cs`）**：
+   - 在 `~` 截图模式下按 **`Tab` 键** 可一键切换水平镜像翻转（`_shotFlipHorizontal`），再次按 `Tab` 恢复原向。
+   - **预览、选框与导出 PNG 完全一致**：镜像状态下全屏预览画面、局部像素放大镜、拖拽选框坐标映射以及最终从原始全分辨率位图无损裁切出的 PNG（`RotateFlip(RotateFlipType.RotateNoneFlipX)`）保持严格左右对称一致，HUD 同步显示 `[已水平翻转 | Tab 复原]` 状态提示。
+2. **双仓库自动同步脚本代理与凭据增强（`tools/RepoSync.ps1`）**：
+   - 自动按「进程环境变量 → `git config http.proxy` → Windows 系统 Internet Settings (`ProxyEnable` / `ProxyServer`)」三级探测代理，并自动复用 Git Credential Manager / `gh auth` 令牌上传 GitHub Release 产物。
+
+### 2. 构建产物与自检结果
+| 产物路径 | 大小 | 编译器 / 警告 (`/warn:4`) | `--self-test-sort` 结果 |
+| :--- | ---: | :--- | :--- |
+| `out\dsh-gallery-explorer.exe` | `177.5 KB` | `csc.exe` C# 5 / `0` 警告 | **PASS (`exit 0`)** |
+
+---
+
+## v2.0.1 构建与开发记录（2026-11-16，Commit `1a73853`）
+
+### 1. 变更摘要
+1. **四色标签筛选/标签排序视频播放列表无缝接力 `ScreenboxLite`（`src/Main/MainWindow.Open.cs`）**：
+   - 双击视频唤起 `ScreenboxLite` 时，除常规目录传递 `DSH_GALLERY_SORT_SPEC`（如 `Name:Asc`、`ModifiedTime:Desc`）外，当用户处于**按标签颜色排序（`SortField.Tag`）**或**左侧四色标签筛选视图（`_activeTagFilter != null`）**时，自动将当前视图中的有序视频完整路径清单写入 `%USERPROFILE%\.dsh\gallery_cache\_dsh_active_video_playlist.txt`，并通过环境变量 `DSH_GALLERY_PLAYLIST_FILE` 传递给 `ScreenboxLite`（v2.0.3+），使 `ScreenboxLite` 内 `PageUp / PageDown` 切换上下视频严格遵循当前筛选/标签顺序。
+2. **Windows 受控文件夹访问（Controlled Folder Access）自检兼容（`build.ps1`、`tools/RepoSync.ps1`）**：
+   - 执行 `--self-test-sort` 前先将临时测试二进制复制至 `%TEMP%` 隔离路径下运行并自动清理，避免在受策略保护的工作区目录中直接派生测试子进程被拦截。
+
+### 2. 构建产物与自检结果
+| 产物路径 | 大小 | 编译器 / 警告 (`/warn:4`) | `--self-test-sort` 结果 |
+| :--- | ---: | :--- | :--- |
+| `out\dsh-gallery-explorer.exe` | `176.0 KB` | `csc.exe` C# 5 / `0` 警告 | **PASS (`exit 0`)** |
+
+---
+
 ## v2.0.0 构建记录（2026-11-14）
 
 ### 1. 构建环境与工具链
